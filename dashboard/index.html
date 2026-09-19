@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RTDI 即時異常監控</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<style>
+  :root{
+    --bg: #0a0e14;
+    --panel: #10151f;
+    --panel-line: #1c2432;
+    --text: #e4e8ee;
+    --text-dim: #6b7688;
+    --ok: #35c46a;
+    --warn: #f0a83c;
+    --alarm: #ef4a5a;
+    --accent: #4fd8e0;
+  }
+  *{ box-sizing: border-box; }
+  html,body{
+    margin:0; padding:0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "IBM Plex Mono", "SF Mono", Menlo, monospace;
+  }
+  .topbar{
+    display:flex; align-items:baseline; justify-content:space-between;
+    padding: 20px 28px 16px;
+    border-bottom: 1px solid var(--panel-line);
+  }
+  .topbar h1{
+    font-size: 18px; font-weight: 600; letter-spacing: 0.02em; margin:0;
+    color: var(--text);
+  }
+  .topbar h1 span{ color: var(--accent); }
+  .status-line{ font-size:12px; color: var(--text-dim); display:flex; gap:18px; align-items:center; }
+  .dot{ width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:6px; background: var(--text-dim); }
+  .dot.live{ background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+
+  .layout{
+    display:grid;
+    grid-template-columns: 1fr 340px;
+    gap: 0;
+    min-height: calc(100vh - 62px);
+  }
+  .stage{ padding: 24px 28px; }
+  .sidebar{
+    border-left: 1px solid var(--panel-line);
+    padding: 20px;
+    display:flex; flex-direction:column; gap:14px;
+    max-height: calc(100vh - 62px);
+    overflow-y:auto;
+  }
+
+  #sketch-holder{
+    background: var(--panel);
+    border: 1px solid var(--panel-line);
+    border-radius: 3px;
+    overflow:hidden;
+  }
+
+  .sidebar h2{
+    font-size: 11px; letter-spacing: 0.08em; color: var(--text-dim);
+    font-weight: 500; margin: 4px 0 2px;
+  }
+
+  .record{
+    background: var(--panel);
+    border: 1px solid var(--panel-line);
+    border-left: 3px solid var(--text-dim);
+    border-radius: 2px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .record.anomaly{ border-left-color: var(--alarm); }
+  .record .row1{ display:flex; justify-content:space-between; color: var(--text); }
+  .record .row1 b{ font-weight:600; }
+  .record .row2{ color: var(--text-dim); font-size: 11.5px; }
+  .record .action-tag{ font-weight:600; font-size:11px; color: var(--warn); }
+  .record.critical .action-tag{ color: var(--alarm); }
+  .record .reason{ margin-top:4px; padding-top:4px; border-top:1px dashed var(--panel-line); font-size:11px; }
+
+  .empty{ color: var(--text-dim); font-size: 12.5px; padding: 20px 4px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>RTDI <span>異常監控</span> — CP Parametric Test</h1>
+  <div class="status-line">
+    <span><span class="dot" id="live-dot"></span><span id="source-label">讀取中…</span></span>
+    <span id="last-update">—</span>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="stage">
+    <div id="sketch-holder"></div>
+  </div>
+  <div class="sidebar" id="record-list">
+    <h2>即時記錄</h2>
+    <div class="empty">等待資料…</div>
+  </div>
+</div>
+
+<script>
+/* =========================================================
+   資料來源設定 —— 之後跟正賢/元珍對接時,只需要改這裡
+   ========================================================= */
+const CONFIG = {
+  // 目前指向本地 mock 檔案。
+  // 之後若正賢採用「GitHub 中轉」方案,把這裡換成該檔案的 raw URL,例如:
+  // "https://raw.githubusercontent.com/Ken0626/mchackathon-advant-lab/casbia/dashboard/live_results.json"
+  dataUrl: "mock_results.json",
+  pollIntervalMs: 3000   // 每幾毫秒重新抓一次資料
+};
+
+let latestData = [];
+let flashMap = {}; // site -> 0~1 閃爍強度,新異常出現時觸發
+
+async function fetchData() {
+  try {
+    // 加時間戳避免瀏覽器快取舊檔案
+    const res = await fetch(CONFIG.dataUrl + "?t=" + Date.now());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    updateData(data);
+    setStatus(true);
+  } catch (err) {
+    console.error("讀取資料失敗:", err);
+    setStatus(false);
+  }
+}
+
+function setStatus(ok) {
+  const dot = document.getElementById("live-dot");
+  const label = document.getElementById("source-label");
+  const time = document.getElementById("last-update");
+  dot.classList.toggle("live", ok);
+  label.textContent = ok ? "連線中" : "連線中斷";
+  time.textContent = "最後更新 " + new Date().toLocaleTimeString("zh-TW", { hour12:false });
+}
+
+function updateData(data) {
+  // 偵測新的異常,觸發視覺閃爍
+  data.forEach(r => {
+    if (r.is_anomaly && !flashMap[r.site + "_" + r.test_number]) {
+      flashMap[r.site + "_" + r.test_number] = 1.0;
+    }
+  });
+  latestData = data;
+  renderRecordList(data);
+}
+
+function renderRecordList(data) {
+  const list = document.getElementById("record-list");
+  list.innerHTML = "<h2>即時記錄</h2>";
+  if (!data.length) {
+    list.innerHTML += '<div class="empty">尚無資料</div>';
+    return;
+  }
+  // 異常的排前面,set_pause比set_message更嚴重,排最前面
+  const severity = { set_pause: 2, set_message: 1, none: 0 };
+  const sorted = [...data].sort((a,b) => (severity[b.action] ?? 0) - (severity[a.action] ?? 0));
+  sorted.forEach(r => {
+    const el = document.createElement("div");
+    el.className = "record" + (r.is_anomaly ? " anomaly" : "") + (r.action === "set_pause" ? " critical" : "");
+    el.innerHTML = `
+      <div class="row1"><b>Site ${r.site}</b><span class="action-tag">${actionLabel(r.action)}</span></div>
+      <div class="row2">test=${r.test_number} · value=${r.value}</div>
+      <div class="row2">${r.is_anomaly ? "⚠ " + (r.anomaly_type ?? "anomaly") : "normal"}</div>
+      ${r.reason ? `<div class="row2 reason">${r.reason}</div>` : ""}
+    `;
+    list.appendChild(el);
+  });
+}
+
+function actionLabel(action) {
+  const map = { set_pause: "⏸ 暫停測試", set_message: "💬 顯示警示", none: "" };
+  return map[action] ?? action;
+}
+
+fetchData();
+setInterval(fetchData, CONFIG.pollIntervalMs);
+
+/* =========================================================
+   p5.js 視覺化 —— 用位置排列 Site,顏色/大小反應異常狀態
+   之後可以在這裡換成你自己設計的呈現方式
+   ========================================================= */
+new p5((p) => {
+  let w, h;
+
+  p.setup = () => {
+    const holder = document.getElementById("sketch-holder");
+    w = holder.clientWidth;
+    h = window.innerHeight - 62 - 48;
+    const c = p.createCanvas(w, h);
+    c.parent(holder);
+  };
+
+  p.windowResized = () => {
+    const holder = document.getElementById("sketch-holder");
+    w = holder.clientWidth;
+    h = window.innerHeight - 62 - 48;
+    p.resizeCanvas(w, h);
+  };
+
+  p.draw = () => {
+    p.background(16, 21, 31);
+
+    if (!latestData.length) {
+      p.noStroke();
+      p.fill(107, 118, 136);
+      p.textAlign(p.CENTER, p.CENTER);
+      p.textSize(13);
+      p.text("等待資料串流進來…", w/2, h/2);
+      return;
+    }
+
+    // 依 site 分組排列成一列節點,節點大小/顏色反映 |z_score|
+    const uniqueSites = [...new Set(latestData.map(r => r.site))].sort((a,b)=>a-b);
+    const marginX = 60;
+    const spacing = (w - marginX*2) / Math.max(uniqueSites.length - 1, 1);
+
+    // 畫基準線(代表 mean)
+    p.stroke(28, 36, 50);
+    p.strokeWeight(1);
+    p.line(marginX, h/2, w - marginX, h/2);
+
+    uniqueSites.forEach((site, i) => {
+      const record = [...latestData].reverse().find(r => r.site === site);
+      if (!record) return;
+
+      const x = marginX + spacing * i;
+      const isAnomaly = record.is_anomaly;
+      const isCritical = record.action === "set_pause";
+
+      // 異常時往上跳離基準線,正常則停在基準線上
+      const targetOffset = isAnomaly ? (isCritical ? h*0.32 : h*0.18) : 0;
+      const y = h/2 - targetOffset;
+
+      // 閃爍效果(新異常出現時觸發一次)
+      const flashKey = site + "_" + record.test_number;
+      let flash = flashMap[flashKey] || 0;
+      if (flash > 0) {
+        flashMap[flashKey] = p.max(0, flash - 0.02);
+      }
+
+      const baseSize = isCritical ? 26 : (isAnomaly ? 20 : 16);
+      const size = baseSize + flash * 20;
+
+      p.noStroke();
+      if (isAnomaly) {
+        const pulse = p.sin(p.frameCount * (isCritical ? 0.22 : 0.12)) * 0.3 + 0.7;
+        const c = isCritical ? [239, 74, 90] : [240, 168, 60];
+        p.fill(c[0], c[1], c[2], 255 * pulse);
+      } else {
+        p.fill(53, 196, 106, 200);
+      }
+      p.circle(x, y, size);
+
+      // 標籤
+      p.fill(228, 232, 238);
+      p.textAlign(p.CENTER, p.CENTER);
+      p.textSize(10);
+      p.text("Site " + site, x, y + size/2 + 14);
+
+      p.fill(107, 118, 136);
+      p.textSize(9);
+      const statusText = isAnomaly ? (isCritical ? "PAUSE" : "ALERT") : "OK";
+      p.text(statusText, x, y + size/2 + 26);
+    });
+  };
+}, "sketch-holder");
+</script>
+
+</body>
+</html>

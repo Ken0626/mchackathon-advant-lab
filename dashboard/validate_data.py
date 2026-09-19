@@ -1,7 +1,7 @@
 import json
 from jsonschema import validate, ValidationError
 
-# 定義我們的資料契約規則
+# 資料契約 v2 —— 對應元珍 AnomalyDetector 實際輸出格式
 schema = {
     "type": "array",
     "items": {
@@ -9,25 +9,22 @@ schema = {
         "properties": {
             "site": {"type": "integer"},
             "test_number": {"type": "string"},
-            "test_suite": {"type": "string"},
             "value": {"type": "number"},
-            "low_limit": {"type": "number"},
-            "high_limit": {"type": "number"},
             "is_anomaly": {"type": "boolean"},
-            "z_score": {"type": ["number", "null"]},
-            "anomaly_type": {"type": ["string", "null"]}
+            "anomaly_type": {"type": ["string", "null"]},
+            "action": {"type": "string"},
+            "reason": {"type": "string"}
         },
-        "required": ["site", "value", "is_anomaly"]   # 這幾個欄位一定要有,其他可以缺
+        "required": ["site", "value", "is_anomaly", "action"]
     }
 }
 
-# 載入你的資料檔,驗證格式
 with open("mock_results.json", "r") as f:
     data = json.load(f)
 
 try:
     validate(instance=data, schema=schema)
-    print("✅ 格式正確,符合資料契約!")
+    print("✅ 格式正確,符合資料契約 v2!")
 except ValidationError as e:
     print("❌ 格式有問題:")
     print(e.message)

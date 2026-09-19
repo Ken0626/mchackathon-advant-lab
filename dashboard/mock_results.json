@@ -2,78 +2,37 @@
   {
     "site": 1,
     "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
     "value": 1.251,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
     "is_anomaly": false,
-    "z_score": -1.07,
-    "anomaly_type": null
+    "anomaly_type": null,
+    "action": "none",
+    "reason": ""
   },
   {
     "site": 2,
     "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
     "value": 1.28,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
     "is_anomaly": false,
-    "z_score": -0.17,
-    "anomaly_type": null
+    "anomaly_type": null,
+    "action": "none",
+    "reason": ""
   },
   {
     "site": 3,
     "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
-    "value": 1.297,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
-    "is_anomaly": false,
-    "z_score": 0.37,
-    "anomaly_type": null
+    "value": 1.9,
+    "is_anomaly": true,
+    "anomaly_type": "Global Feature Anomaly",
+    "action": "set_pause",
+    "reason": "MSE 0.0089 超出閾值 0.0063"
   },
   {
     "site": 4,
     "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
     "value": 1.243,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
     "is_anomaly": false,
-    "z_score": -1.32,
-    "anomaly_type": null
-  },
-  {
-    "site": 1,
-    "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
-    "value": 1.337,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
-    "is_anomaly": false,
-    "z_score": 1.62,
-    "anomaly_type": null
-  },
-  {
-    "site": 2,
-    "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
-    "value": 1.304,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
-    "is_anomaly": false,
-    "z_score": 0.58,
-    "anomaly_type": null
-  },
-  {
-    "site": 3,
-    "test_number": "220",
-    "test_suite": "Main.Suite1#CP",
-    "value": 1.9,
-    "low_limit": 0.6,
-    "high_limit": 1.8,
-    "is_anomaly": true,
-    "z_score": 19.21,
-    "anomaly_type": "z_score_outlier"
+    "anomaly_type": null,
+    "action": "none",
+    "reason": ""
   }
 ]
