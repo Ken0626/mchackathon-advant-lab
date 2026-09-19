@@ -21,6 +21,7 @@ from oneapi import toSite
 from oneapi import DFFData
 from oneapi import QueryResponse
 from oneapi import DFF
+from thread_block_handler import ThreadBlockHandler
 from libACSAction import ActionManager
 
 # Define callback as a global function, don’t define an inner function.
@@ -97,6 +98,8 @@ class SampleMonitor(Monitor):
         Monitor.__init__(self)
         self.mTouchdownCnt = 0
         self.fileTransfer = FileTransfer.FileTransfer()
+        self.threadBlockHandler = ThreadBlockHandler()
+        self.model = None # TODO ========================================================================================
 
     # derive callback func for NexusTPI::send
     def consumeTPSend(self, tc, data):
@@ -500,6 +503,21 @@ class SampleMonitor(Monitor):
             self.consumeTestSuiteStart(data)
         elif datatype == DataType.DATA_TYP_PRODUCTION_TESTSUITEEND:
             self.consumeTestSuiteEnd(data)
+
+        
+
+    def _error_detection(self, tc, data):
+        for rec in records:
+            if rec["test_number"] in TARGET_TEST_NUMBERS:
+                self.feature_buffer[rec["test_number"]] = rec["result"]
+
+        if self._has_enough_features_for_next_prediction():
+            # 把buffer照CSV訓練時的欄位順序組成feature vector
+            x = [self.feature_buffer[num] for num in sorted(self.feature_buffer)]
+            pred = self.model.predict(x)
+            if pred.is_abnormal:
+                ActionManager.set_message(tester_id, f"異常: {pred.detail}")
+
 
     def download_from_sftp(self, local_path, remote_file_name):
         try:
