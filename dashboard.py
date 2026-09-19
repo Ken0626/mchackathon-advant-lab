@@ -109,39 +109,57 @@ class AnomalyDetector:
         return self.create_decision(False)
 
 
-# ================= 3. 執行主程式 (模擬與正賢、心靈介接) ================= #
+import json
+import time
+# (記得確認檔案最上方有 import json 與 import time)
+
+# ... (中間的 AnomalyDetector 類別維持原樣，不需要動) ...
+
+# ================= 3. 執行主程式 (B 計畫：讀檔案輪詢版) ================= #
 if __name__ == "__main__":
     def simulate_oneapi_stream(csv_path):
         df_data = pd.read_csv(csv_path, skiprows=[1, 2, 3])
         target_param = "220_Main.Suite1#CP"
         
-        # 1. 啟動 Flask 背景執行緒，負責對外發送 JSON
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        print("🌐 Dashboard API 已啟動！心靈可以連線至: http://127.0.0.1:5000/api/status")
-        print("⏳ 開始模擬機台生產數據，每 0.5 秒進件一次...\n")
+        # 定義給心靈的共用狀態字典
+        dashboard_state = {
+            "current_window": [],  
+            "alerts": [],          
+            "limits": {            
+                "high": 1.8, 
+                "low": 0.6
+            }
+        }
         
-        # 2. 正賢初始化你的檢測器
+        # 1. 正賢初始化你的檢測器
         detector = AnomalyDetector(window_size=16)
+        print("⏳ 開始模擬機台生產數據，並即時覆寫 dashboard_status.json ...\n")
         
-        # 3. 模擬 OneAPI 監聽到機台不斷送出新資料
+        # 2. 模擬 OneAPI 監聽到機台不斷送出新資料
         for index, row in df_data.iterrows():
             site = int(row["Site"])
             value = float(row[target_param])
             
-            # 取得決策清單
+            # 正賢呼叫你的 API，取得決策清單
             alerts = detector.process_new_data(site, value, target_param)
             
-            # --- 關鍵：將最新狀態寫入全域字典，給 Flask 取用 ---
+            # --- 更新全域字典 ---
             dashboard_state["current_window"] = detector.sliding_window
             dashboard_state["alerts"] = alerts
             
-            if alerts:
-                print(f"[{index+1}] 🚨 觸發異常: {alerts[0]['anomaly_type']}")
-            else:
-                print(f"[{index+1}] ✅ 正常: Site {site} 測出 {value}")
+            # =======================================================
+            # 🌟 放這裡！每次狀態一更新，就立刻覆寫存成實體 JSON 檔
+            # =======================================================
+            with open("dashboard_status.json", "w", encoding="utf-8") as f:
+                json.dump(dashboard_state, f, ensure_ascii=False, indent=2)
             
-            # 放慢迴圈速度，讓你有時間打開瀏覽器看 JSON 變化
+            # 在終端機印出提示，讓你知道跑到哪了
+            if alerts:
+                print(f"[{index+1}] 🚨 觸發異常: {alerts[0]['anomaly_type']} (已寫入 JSON)")
+            else:
+                print(f"[{index+1}] ✅ 正常: Site {site} 測出 {value} (已寫入 JSON)")
+            
+            # 放慢迴圈速度，模擬真實機台運作節奏
             time.sleep(0.5) 
 
     simulate_oneapi_stream("data/example.csv")
