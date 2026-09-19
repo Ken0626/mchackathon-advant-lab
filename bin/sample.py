@@ -7,6 +7,7 @@ import os
 import signal
 import json
 import time
+import threading
 import FileTransfer
 import traceback
 import logging
@@ -23,6 +24,23 @@ from oneapi import QueryResponse
 from oneapi import DFF
 from thread_block_handler import ThreadBlockHandler
 from libACSAction import ActionManager
+
+# 偵測 / 預測模型是同事寫的 anomaly_detector.py。import 失敗(缺 pandas/sklearn 之類)時
+# App 仍要能連上 Nexus 收資料，只是不做分析，避免整個 container 起不來。
+try:
+    import numpy as np
+    import pandas as pd
+    from anomaly_detector import AnomalyDetector
+except Exception:
+    traceback.print_exc()
+    AnomalyDetector = None
+
+TARGET_TEST_NUMBER = 220                   # 220_Main.Suite1#CP，滑動窗口 / Isolation Forest 監控的測項
+TARGET_PARAM = "220_Main.Suite1#CP"
+VALID_SITES = (1, 2, 3, 4)
+PREDICT_WAIT_TIME = 10                     # 沿用題目簡報範例的 set_wait 參數
+PREDICT_SYNC_TIMEOUT = 1.0                 # 等 Kafka 資料流追上 TP 預測請求的最長秒數
+FALLBACK_TEMP = 25.0                       # 模型不可用時的預測值
 
 # Define callback as a global function, don’t define an inner function.
 # def onUploadComplete(result, properties, data):
@@ -99,7 +117,22 @@ class SampleMonitor(Monitor):
         self.mTouchdownCnt = 0
         self.fileTransfer = FileTransfer.FileTransfer()
         self.threadBlockHandler = ThreadBlockHandler()
-        self.model = None # TODO ========================================================================================
+
+        # 目前這個 touchdown 各 site 已收到的 parametric 結果: {site: {test_number: value}}
+        # consumeData(Kafka thread)寫入，consumeTPRequest(ZMQ thread)讀取，用 Condition 保護
+        self.rows_cv = threading.Condition()
+        self.site_rows = {}
+
+        # detector 內部狀態(history)只會在 worker thread 被碰，不用另外上鎖
+        self.detector = None
+        if AnomalyDetector is not None:
+            try:
+                self.detector = AnomalyDetector(window_size=16)
+                # Track A(PCA)的 feature_cols 從未載入，process_new_data 會直接 raise，
+                # 連帶 Track B(Isolation Forest)也跑不到。修好前先關掉。
+                self.detector.pca = None
+            except Exception:
+                traceback.print_exc()
 
     # derive callback func for NexusTPI::send
     def consumeTPSend(self, tc, data):
@@ -132,6 +165,8 @@ class SampleMonitor(Monitor):
             print(f"Get Action: {response}")
         elif key == "reset_td":
             self.mTouchdownCnt = 0
+        elif key == "predict":
+            response = self.handlePredict(tc, data)
         elif isTP_report == True:
             tp_info = jsonObj.get("tp_info")            
             print(f"receive test program information:\n {tp_info}") 
@@ -142,6 +177,47 @@ class SampleMonitor(Monitor):
             response = "unsupported"
         print(f"key={key} data={data} keyaction={key_action} response = {response}")   
         return response
+
+    def handlePredict(self, tc, data):
+        """TP 送來 key=predict, data=sensor 編號(1~6)。
+        照簡報做法: 預測結果用 set_wait 的 reason 帶回，再用 get 取出當作 response。"""
+        try:
+            sensor_num = int(data)
+        except (TypeError, ValueError):
+            print(f"predict: invalid sensor number {data!r}")
+            return "unsupported"
+        preds = self.predictSensor(sensor_num)
+        message = f"prediction {sensor_num}: " + "".join(f"({site},{val:.2f}) " for site, val in preds)
+        ActionManager.set_wait(tc.testerId, PREDICT_WAIT_TIME, message)
+        return ActionManager.get(tc.testerId)
+
+    def predictSensor(self, sensor_num):
+        """回傳 [(site, predicted_temp), ...]。只用「該 sensor 之前」的測項(訓練時就是這樣切的)。"""
+        pkg = self.detector.temp_package if self.detector is not None else None
+        model = pkg["models"].get(sensor_num) if pkg else None
+        features = pkg["features"].get(sensor_num, []) if pkg else []
+        # 模型用 "220_Main.Suite1#CP" 這種欄位名，Nexus 端只有 test number，所以用開頭的編號對應
+        nums = [int(f.split("_", 1)[0]) for f in features]
+
+        def ready():
+            return bool(self.site_rows) and (not nums or all(nums[-1] in r for r in self.site_rows.values()))
+
+        with self.rows_cv:
+            # 資料走 Kafka、TP 請求走 ZMQ，兩條不同通道，請求可能比最後幾筆量測早到
+            self.rows_cv.wait_for(ready, timeout=PREDICT_SYNC_TIMEOUT)
+            rows = {site: dict(r) for site, r in self.site_rows.items()}
+
+        out = []
+        for site in sorted(rows) or list(VALID_SITES):
+            value = FALLBACK_TEMP
+            if model is not None and not isinstance(model, str) and nums:
+                try:
+                    vec = np.array([[rows.get(site, {}).get(n, 0.0) for n in nums]], dtype=float)
+                    value = float(model.predict(vec)[0])
+                except Exception:
+                    traceback.print_exc()
+            out.append((site, value))
+        return out
 
     # derive callback func for NexusTPI::upload
     def consumeTPUpload(self, tc, file_path):
@@ -255,6 +331,8 @@ class SampleMonitor(Monitor):
     def consumeTestStart(self, data):
         print(sys._getframe().f_code.co_name)
         self.mTouchdownCnt += 1
+        with self.rows_cv:
+            self.site_rows.clear()
         print(f"get_TimeStamp = {data.get_TimeStamp()}")
         cnt = data.get_ResultCount()
         print(f"get_ResultCount = {cnt}")
@@ -292,26 +370,35 @@ class SampleMonitor(Monitor):
         print(f"get_TimeStamp = {data.get_TimeStamp()}")
         print(f"get_TestFlowName = {data.get_TestFlowName()}")
 
-    def consumeParametricTest(self, data):
+    def consumeParametricTest(self, tc, data):
+        # 在 Nexus callback thread 上執行，且 get_/query_ 的值離開此函式就失效(NOTE 2)，
+        # 所以這裡只做「取值 + 存起來」，耗時的偵測丟給背景 thread。
         print(sys._getframe().f_code.co_name)
         cnt = data.get_ResultCount()
-        print(f"get_ResultCount = {cnt}")
-        for index in range(0, cnt):
-            tempU32 = data.query_HeadSite(index)
-            print(f"Head = {toHead(tempU32)} Site = {toSite(tempU32)}")
-            print(f"query_TestNumber = {data.query_TestNumber(index)}")
-            print(f"query_TestText = {data.query_TestText(index)}")
-            print(f"query_LowLimit = {data.query_LowLimit(index)}")
-            print(f"query_HighLimit = {data.query_HighLimit(index)}")
-            print(f"query_Unit = {data.query_Unit(index)}")
-            print(f"query_TestFlag = {data.query_TestFlag(index)}")
-            print(f"query_Result = {data.query_Result(index)}")
-            print(f"query_ResultScaling = {data.query_ResultScaling(index)}")
-            print(f"query_LowLimitScaling = {data.query_LowLimitScaling(index)}")
-            print(f"query_HighLimitScaling = {data.query_HighLimitScaling(index)}")
-            print(f"query_ParamFlag = {data.query_ParamFlag(index)}")
-            print(f"query_TestSuite = {data.query_TestSuite(index)}")
-            print(f"query_MeasurementName = {data.query_MeasurementName(index)}")
+        targets = []
+        with self.rows_cv:
+            for index in range(0, cnt):
+                site = toSite(data.query_HeadSite(index))
+                number = data.query_TestNumber(index)
+                result = data.query_Result(index)
+                self.site_rows.setdefault(site, {})[number] = result
+                if number == TARGET_TEST_NUMBER and site in VALID_SITES:
+                    targets.append((site, result, data.query_HighLimit(index), data.query_LowLimit(index)))
+            self.rows_cv.notify_all()
+            snapshots = {site: dict(self.site_rows[site]) for site, *_ in targets}
+
+        tester_id = tc.testerId
+        for site, value, high, low in targets:
+            self.threadBlockHandler.submit(self.analyzeTarget, tester_id, site, value, high, low, snapshots[site])
+
+    def analyzeTarget(self, tester_id, site, value, high, low, row):
+        """背景 thread: 跑異常偵測，有異常就用 ActionManager.set_message 通知機台端。"""
+        if self.detector is None:
+            return
+        for alert in self.detector.process_new_data(site, value, TARGET_PARAM, pd.Series(row), high, low):
+            message = f"[{alert['anomaly_type']}] {alert['reason']}"
+            print(f"ANOMALY: {message}")
+            ActionManager.set_message(tester_id, message)
 
     def consumeFunctionalTest(self, data):
         print(sys._getframe().f_code.co_name)
@@ -484,7 +571,7 @@ class SampleMonitor(Monitor):
         elif datatype == DataType.DATA_TYP_PRODUCTION_TESTFLOWEND:
             self.consumeTestFlowEnd(data)
         elif datatype == DataType.DATA_TYP_MEASURED_PARAMETRIC:
-            self.consumeParametricTest(data)
+            self.consumeParametricTest(tc, data)
         elif datatype == DataType.DATA_TYP_MEASURED_FUNCTIONAL:
             self.consumeFunctionalTest(data)
         elif datatype == DataType.DATA_TYP_MEASURED_MULTI_PARAM:
