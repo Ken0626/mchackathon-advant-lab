@@ -6,4 +6,5 @@ dashboard_status.json
 py-app.log
 data/training_data_raw.csv
 data/Data/
-bin/models/*.pkl
+bin/models/*.pklbin/dashboard_status.json*
+bin/alerts_history.jsonl
