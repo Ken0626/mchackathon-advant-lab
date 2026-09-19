@@ -1,4 +1,8 @@
 venv/
-.venv/
-data/
-bin/__pycache__
+__pycache__/
+*.pyc
+dashboard_status.json
+py-app.log
+data/training_data_raw.csv
+data/Data/
+bin/models/*.pkl
