@@ -60,18 +60,28 @@ class AnomalyDetector:
         self.latest_full_row[site] = full_row 
         
         # --- 雙軌防禦 Track A: PCA 全特徵重建誤差檢查 ---
+        # --- 雙軌防禦 Track A: PCA 全特徵重建誤差檢查 ---
         if self.pca is not None and self.scaler is not None:
+            # 不要每次都重新 parse，要讀取訓練時存下來的欄位列表
             if self.feature_cols is None:
-                self.feature_cols = [col for col in full_row.index if '_Main.' in col]
-            
-            raw_features = full_row[self.feature_cols].fillna(0).infer_objects(copy=False).values.reshape(1, -1)
-            features = self.scaler.transform(raw_features) 
+                # 這裡應該要從你訓練時存下來的 config 或 JSON 讀取
+                # 而不是看當下 full_row 裡有什麼就抓什麼
+                raise ValueError("未載入訓練時的 feature_cols！請確保特徵順序一致。")
+
+            # 確保只取訓練時看過的欄位，並按照訓練時的順序排列
+            # 若新 CSV 缺少某個欄位，會自動補 NaN 再填 0
+            raw_features = full_row.reindex(columns=self.feature_cols).fillna(0).values.reshape(1, -1)
+            features = self.scaler.transform(raw_features)
             
             proj = self.pca.transform(features)
             recon = self.pca.inverse_transform(proj)
             mse = np.mean(np.power(features - recon, 2))
             
+            # 👇 加入這行 DEBUG 觀察實際數值
+            print(f"[DEBUG PCA] Site {site} | 實際 MSE: {mse:.4f} | 當前閾值: {self.pca_threshold}")
+            
             if mse > self.pca_threshold:
+                # 若不想一直被洗版，可以暫時把這裡的 mse 條件放寬，例如改為 if mse > (self.pca_threshold * 1.5):
                 decisions.append(self.create_decision(
                     True, "Global Feature Anomaly", "set_pause", f"MSE {mse:.4f} 超出閾值 (Site {site})"
                 ))
@@ -90,6 +100,10 @@ class AnomalyDetector:
             if self.iso_forest is not None and site == 4:
                 latest_features = [self.history[s][-1] for s in [1, 2, 3, 4]]
                 prediction = self.iso_forest.predict([latest_features])
+                
+                # 👇 加入這行 DEBUG 觀察 Isolation Forest 看到的數值
+                # print(f"[DEBUG IF] 輸入特徵: {latest_features} | 預測結果: {prediction[0]}")
+                
                 if prediction[0] == -1: 
                     decisions.append(self.create_decision(
                         True, "Point Anomaly (IF)", "set_message", f"關鍵測項 {target_param} 發生極端異常"
