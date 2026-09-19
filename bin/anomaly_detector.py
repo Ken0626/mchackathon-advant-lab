@@ -34,24 +34,14 @@ from window_features import (
     STAT_NAMES, STAT_TO_ANOMALY, window_stats, anomaly_scores, top_offenders,
 )
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-def _resolve(path):
-    """相對路徑先用目前工作目錄找，找不到就改用本檔案所在的資料夾。
-    這樣不管從專案根目錄、從 bin/、還是從容器裡的 /opt/nexus/OneAPI/bin 執行都能跑。"""
-    if os.path.isabs(path) or os.path.exists(path):
-        return path
-    alt = os.path.join(_HERE, path)
-    return alt if os.path.exists(alt) else path
 
 class AnomalyDetector:
 
     def __init__(self, model_dir="models", verbose=True):
         self.verbose = verbose
-        self.model_dir = _resolve(model_dir)
+        self.model_dir = model_dir
 
-        base_path = os.path.join(self.model_dir, "anomaly_baseline.pkl")
+        base_path = os.path.join(model_dir, "anomaly_baseline.pkl")
         if not os.path.exists(base_path):
             raise FileNotFoundError(
                 f"找不到 {base_path}。請先執行 train_anomaly_model.py。"
@@ -85,6 +75,10 @@ class AnomalyDetector:
         self.last_alerts = []
         self.last_scores = None
 
+        # 溫度預測結果（給 dashboard 顯示，不影響回覆機台的內容）
+        self.temp_latest = {}
+        self.temp_history = {}
+
         if verbose:
             print(f"[Detector] 基準載入完成：{len(self.feature_cols)} 個測項，"
                   f"視窗 {self.window_size}，每 {self.eval_every} 顆評估一次")
@@ -112,6 +106,8 @@ class AnomalyDetector:
         self.pass_count = 0
         self.total_count = 0
         self.last_alerts = []
+        self.temp_latest = {}
+        self.temp_history = {}
 
     def _to_vector(self, results):
         """把 {測項名稱: 數值} 對齊成訓練時的欄位順序。缺測項補 0。"""
@@ -230,15 +226,29 @@ class AnomalyDetector:
     # ------------------------------------------------------------------
     # 場景二：溫度預測
     # ------------------------------------------------------------------
-    def predict_temperature(self, sensor_num):
+    def predict_temperature(self, sensor_num, current_results=None):
         """
         測試程式送編號 1~6 過來，回傳四個 site 的預測溫度（攝氏）。
         格式沿用簡報第 5 頁的樣子： 'site[1]: 28.95 site[2]: 28.71 ...'
+
+        current_results : {site: {測項名稱: 數值}}
+            「這一顆 die 目前為止已經量到的結果」。必須由呼叫端傳入。
+
+        為什麼一定要傳這個而不是用 self.latest_row：
+        測試流程是 Suite1~14 -> IDDQ -> receive_temp_predict1 -> sensor1 -> subflow1 -> ...
+        也就是說，預測請求發生在這顆 die「還沒測完」的時候。
+        self.latest_row 要等 PRODUCTION_TESTEND 才會更新，那時候拿到的是「上一顆」的資料。
+        用上一顆的測項去預測這一顆的溫度，精度會退回接近猜平均的水準。
+
+        傳 buffer 進來還有一個額外好處：時序限制變成物理上保證的。
+        buffer 裡根本不會有還沒執行的測項，想洩漏也洩漏不了。
         """
         if self.temp_package is None:
             return "Error: temperature model not loaded"
         if sensor_num not in self.temp_package["models"]:
             return f"Error: no model for sensor {sensor_num}"
+
+        source = current_results if current_results is not None else self.latest_row
 
         model = self.temp_package["models"][sensor_num]
         feats = self.temp_package["features"][sensor_num]
@@ -246,14 +256,39 @@ class AnomalyDetector:
 
         parts = []
         for site in (1, 2, 3, 4):
-            row = self.latest_row[site]
-            if row is None:
+            row = source.get(site) if hasattr(source, "get") else None
+            if not row:
                 parts.append(f"site[{site}]: NA")
                 continue
             vec = self._to_vector(row)
             x = np.array([[vec[i] if i is not None else 0.0 for i in idx]])
             parts.append(f"site[{site}]: {float(model.predict(x)[0]):.2f}")
         return " ".join(parts)
+
+    def record_temperature(self, sensor_num, message):
+        """
+        把一次溫度預測的結果記下來，供 dashboard 顯示。
+        由 oneapi_monitor 在回覆測試程式之後順手呼叫，不影響回覆本身的延遲。
+
+        同時保留每個 sensor 的預測歷史（最近 40 個 touchdown），
+        讓前端可以畫溫度隨時間的走勢，而不只是當下這一個數字。
+        """
+        parsed = {}
+        for token in str(message).split("site[")[1:]:
+            try:
+                num, rest = token.split("]:", 1)
+                parsed[int(num)] = float(rest.split()[0])
+            except (ValueError, IndexError):
+                continue
+        if not parsed:
+            return
+
+        key = f"sensor{sensor_num}"
+        self.temp_latest[key] = parsed
+        hist = self.temp_history.setdefault(key, [])
+        hist.append({"n": self.total_count, **{str(k): v for k, v in parsed.items()}})
+        if len(hist) > 40:
+            hist.pop(0)
 
     # ------------------------------------------------------------------
     # 給心靈的 Dashboard
@@ -276,6 +311,12 @@ class AnomalyDetector:
             "thresholds": {n: float(t) for n, t in zip(STAT_NAMES, self.thresholds)},
             "current_window": window,
             "limits": self._limits_for(monitor_test),
+            "temperature": {
+                "latest": self.temp_latest,
+                "history": self.temp_history,
+                "unit": "C",
+                "mae": self.temp_package.get("mae") if self.temp_package else None,
+            },
         }
 
     def _limits_for(self, test_name):

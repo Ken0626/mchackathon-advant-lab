@@ -21,6 +21,7 @@ ONEAPI 是一個測項結果一個事件（MEASURED_PARAMETRIC / MEASURED_MULTI_
 
 import os
 import logging
+import threading
 
 from oneapi import Monitor, DataType, ActionManager   # ONEAPI 提供
 from anomaly_detector import AnomalyDetector
@@ -34,8 +35,11 @@ class SmartMonitor(Monitor):
     def __init__(self):
         super().__init__()
         self.detector = AnomalyDetector(model_dir=MODEL_DIR)
-        self.buffer = {}     # {site: {欄位名稱: 數值}}
+        self.buffer = {}     # {site: {欄位名稱: 數值}} 這一顆 die 目前為止的結果
         self.paused = False
+        # 場景一走 consumeData、場景二走 handleRequest，兩者可能在不同執行緒，
+        # 共用 buffer 與 detector 的滑動窗口，所以要上鎖。
+        self.lock = threading.RLock()
 
     # ---------- 欄位名稱組裝 ----------
     @staticmethod
@@ -54,21 +58,23 @@ class SmartMonitor(Monitor):
         try:
             dtype = data.getType()
 
-            if dtype == DataType.DATA_TYP_PRODUCTION_WAFERSTART:
-                self.detector.on_wafer_start(getattr(data, "getWaferId", lambda: None)())
-                self.buffer.clear()
-                self.paused = False
+            # 上鎖：場景一寫 buffer 與滑動窗口，場景二會讀 buffer，兩者可能不同執行緒
+            with self.lock:
+                if dtype == DataType.DATA_TYP_PRODUCTION_WAFERSTART:
+                    self.detector.on_wafer_start(getattr(data, "getWaferId", lambda: None)())
+                    self.buffer.clear()
+                    self.paused = False
 
-            elif dtype in (DataType.DATA_TYP_MEASURED_PARAMETRIC,
-                           DataType.DATA_TYP_MEASURED_MULTI_PARAM):
-                site = int(data.getSiteNumber())
-                self.buffer.setdefault(site, {})[self._column_name(data)] = float(data.getValue())
+                elif dtype in (DataType.DATA_TYP_MEASURED_PARAMETRIC,
+                               DataType.DATA_TYP_MEASURED_MULTI_PARAM):
+                    site = int(data.getSiteNumber())
+                    self.buffer.setdefault(site, {})[self._column_name(data)] = float(data.getValue())
 
-            elif dtype == DataType.DATA_TYP_PRODUCTION_TESTEND:
-                self._on_test_end(tc, data)
+                elif dtype == DataType.DATA_TYP_PRODUCTION_TESTEND:
+                    self._on_test_end(tc, data)
 
-            elif dtype == DataType.DATA_TYP_PRODUCTION_WAFEREND:
-                self.detector.dump_dashboard(DASHBOARD_PATH)
+                elif dtype == DataType.DATA_TYP_PRODUCTION_WAFEREND:
+                    self.detector.dump_dashboard(DASHBOARD_PATH)
 
         except Exception:
             # consumeData 丟例外會卡住 ONEAPI 的執行緒，一律吞掉並記錄
@@ -101,13 +107,30 @@ class SmartMonitor(Monitor):
     def handleRequest(self, tc, request):
         """
         對應簡報第 5 頁：測試程式送編號 1~6，container 回傳各 site 的預測值。
-        實際的 request 解析方式依你現有 sample.py 的 key/data 格式調整。
+
+        關鍵：傳 self.buffer 進去，不是讓 detector 自己去翻 latest_row。
+        這個請求發生在 die 還沒測完的時候（receive_temp_predictN 在 sensorN 之前），
+        buffer 裡才是「這一顆目前為止量到的東西」。
         """
         import json
         obj = json.loads(request)
         if obj.get("key") != "predict":
             return ""
         sensor_num = int(obj.get("data"))
-        message = f"prediction {sensor_num}: " + self.detector.predict_temperature(sensor_num)
+
+        with self.lock:
+            snapshot = {s: dict(r) for s, r in self.buffer.items()}
+
+        result = self.detector.predict_temperature(sensor_num, snapshot)
+        message = f"prediction {sensor_num}: " + result
         ActionManager.set_wait(tc.testerId, 10, message)
-        return ActionManager.get(tc.testerId)
+        reply = ActionManager.get(tc.testerId)
+
+        # 回覆機台之後才記錄，不增加測試程式等待的時間
+        try:
+            self.detector.record_temperature(sensor_num, result)
+            self.detector.dump_dashboard(DASHBOARD_PATH)
+        except Exception:
+            logging.exception("record_temperature 失敗（不影響預測回覆）")
+
+        return reply
