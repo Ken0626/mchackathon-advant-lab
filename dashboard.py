@@ -32,44 +32,48 @@ def run_flask():
 
 # ================= 2. 演算法核心 (維持不變) ================= #
 class AnomalyDetector:
-    def __init__(self, window_size=16):
+    def __init__(self, window_size=16, model_path=None):
         self.window_size = window_size
         self.sliding_window = []
         self.baseline_std = None
+        
+        # 🌟 ML 核心：在這裡載入你預先訓練好的模型
+        self.ml_model = None
+        if model_path:
+            print(f"正在載入 ML 模型: {model_path}")
+            # [PyTorch 範例] self.ml_model = torch.load(model_path)
+            # [XGBoost/Sklearn 範例] self.ml_model = joblib.load(model_path)
+            
+            # 這裡我們先放一個 Dummy Flag，代表模型已準備就緒
+            self.ml_model = "Model_Loaded"
 
     def create_decision(self, is_anomaly, anomaly_type="Normal", action="none", reason=""):
-        return {
-            "is_anomaly": is_anomaly,
-            "anomaly_type": anomaly_type,
-            "action": action,
-            "reason": reason
-        }
+        return {"is_anomaly": is_anomaly, "anomaly_type": anomaly_type, "action": action, "reason": reason}
 
-    def process_new_data(self, site, value, param_name="220_Main.Suite1#CP"):
+    def process_new_data(self, site, value, limits, param_name="220_Main.Suite1#CP"):
         self.sliding_window.append({"site": site, "value": value})
-        
         if len(self.sliding_window) > self.window_size:
             self.sliding_window.pop(0)
-            
         if len(self.sliding_window) < self.window_size:
             return []
             
         df_window = pd.DataFrame(self.sliding_window)
-        
         if self.baseline_std is None:
-            self.baseline_std = df_window['value'].std()
-            if self.baseline_std == 0:
-                self.baseline_std = 0.01 
+            self.baseline_std = df_window['value'].std() or 0.01 
                 
+        # 1. 傳統的規則防呆 (Rule-based) 依然保留，當作第一道防線
         decisions = [
             self.check_site_unbalance(df_window, param_name),
-            self.check_trend(df_window, threshold=0.1),
-            self.check_std_trend(df_window, std_multiplier_threshold=2.0),
             self.check_value_shift(df_window, shift_threshold=0.2)
         ]
         
+        # 2. 🌟 呼叫 ML 模型進行深度特徵推論
+        if self.ml_model:
+            ml_decision = self.predict_with_ml(df_window)
+            decisions.append(ml_decision)
+            
         return [d for d in decisions if d["is_anomaly"]]
-
+    
     def check_site_unbalance(self, df_window, param_name, std_multiplier=1.5):
         site_means = df_window.groupby('site')['value'].mean()
         overall_mean = df_window['value'].mean()
@@ -108,58 +112,93 @@ class AnomalyDetector:
                 return self.create_decision(True, "Measure Value Shift", "set_pause", f"Site {site} 發生 {direction} 偏移")
         return self.create_decision(False)
 
+    def predict_with_ml(self, df_window):
+        """
+        將滑動窗口的資料轉換成特徵 (Feature Engineering)，
+        然後餵給 ML 模型 (Autoencoder / XGBoost / Isolation Forest) 進行異常預測。
+        """
+        # 步驟 1: 特徵工程 (Feature Extraction)
+        # 模型通常不吃 raw data，而是吃特徵。這裡我們把 16 筆資料轉換成一個特徵向量。
+        features = []
+        for site, group in df_window.groupby('site'):
+            if len(group) >= 3:
+                y = group['value'].values
+                x = np.arange(len(y))
+                slope, _ = np.polyfit(x, y, 1)
+                
+                # 萃取該 Site 的特徵：最新值、平均、標準差、斜率
+                features.extend([
+                    y[-1],                # Current Value
+                    group['value'].mean(),# Mean
+                    group['value'].std(), # Std Dev
+                    slope                 # Trend Slope
+                ])
+                
+        # 如果資料不足以產生完整特徵，先跳過推論
+        if len(features) < 16:  # 4 個 Site * 4 個特徵 = 16 維向量
+            return self.create_decision(False)
 
-import json
-import time
-# (記得確認檔案最上方有 import json 與 import time)
+        # 步驟 2: 執行模型推論
+        # 轉換成模型吃得下的格式 (例如 numpy array 或 PyTorch Tensor)
+        # X_input = np.array([features])
+        # [PyTorch 範例] 
+        # tensor_input = torch.FloatTensor(X_input)
+        # reconstruction = self.ml_model(tensor_input)
+        # loss = torch.nn.functional.mse_loss(reconstruction, tensor_input)
+        # is_anomaly = loss.item() > 0.05 (你的報警閾值)
+        
+        # [Isolation Forest / XGBoost 範例]
+        # prediction = self.ml_model.predict(X_input)
+        # is_anomaly = (prediction[0] == -1)  # -1 通常代表異常
+        
+        # ⚠️ 這裡先寫死一個隨機模擬的判定，等你真的把模型訓練好再把上面的註解打開替換掉！
+        mock_ml_anomaly_score = np.random.rand() 
+        is_ml_anomaly = mock_ml_anomaly_score > 0.95 # 有 5% 機率觸發
 
-# ... (中間的 AnomalyDetector 類別維持原樣，不需要動) ...
+        if is_ml_anomaly:
+            return self.create_decision(
+                is_anomaly=True, 
+                anomaly_type="ML Model Detection (預知異常)", 
+                action="set_message", 
+                reason=f"ML 模型偵測到深層特徵異常，異常分數達 {mock_ml_anomaly_score:.3f}"
+            )
+            
+        return self.create_decision(False)
 
-# ================= 3. 執行主程式 (B 計畫：讀檔案輪詢版) ================= #
+
+# ================= 3. 執行主程式 (模擬與正賢、心靈介接) ================= #
 if __name__ == "__main__":
     def simulate_oneapi_stream(csv_path):
         df_data = pd.read_csv(csv_path, skiprows=[1, 2, 3])
         target_param = "220_Main.Suite1#CP"
         
-        # 定義給心靈的共用狀態字典
-        dashboard_state = {
-            "current_window": [],  
-            "alerts": [],          
-            "limits": {            
-                "high": 1.8, 
-                "low": 0.6
-            }
-        }
+        # 1. 啟動 Flask 背景執行緒，負責對外發送 JSON
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        print("🌐 Dashboard API 已啟動！心靈可以連線至: http://127.0.0.1:5000/api/status")
+        print("⏳ 開始模擬機台生產數據，每 0.5 秒進件一次...\n")
         
-        # 1. 正賢初始化你的檢測器
+        # 2. 正賢初始化你的檢測器
         detector = AnomalyDetector(window_size=16)
-        print("⏳ 開始模擬機台生產數據，並即時覆寫 dashboard_status.json ...\n")
         
-        # 2. 模擬 OneAPI 監聽到機台不斷送出新資料
+        # 3. 模擬 OneAPI 監聽到機台不斷送出新資料
         for index, row in df_data.iterrows():
             site = int(row["Site"])
             value = float(row[target_param])
             
-            # 正賢呼叫你的 API，取得決策清單
+            # 取得決策清單
             alerts = detector.process_new_data(site, value, target_param)
             
-            # --- 更新全域字典 ---
+            # --- 關鍵：將最新狀態寫入全域字典，給 Flask 取用 ---
             dashboard_state["current_window"] = detector.sliding_window
             dashboard_state["alerts"] = alerts
             
-            # =======================================================
-            # 🌟 放這裡！每次狀態一更新，就立刻覆寫存成實體 JSON 檔
-            # =======================================================
-            with open("dashboard_status.json", "w", encoding="utf-8") as f:
-                json.dump(dashboard_state, f, ensure_ascii=False, indent=2)
-            
-            # 在終端機印出提示，讓你知道跑到哪了
             if alerts:
-                print(f"[{index+1}] 🚨 觸發異常: {alerts[0]['anomaly_type']} (已寫入 JSON)")
+                print(f"[{index+1}] 🚨 觸發異常: {alerts[0]['anomaly_type']}")
             else:
-                print(f"[{index+1}] ✅ 正常: Site {site} 測出 {value} (已寫入 JSON)")
+                print(f"[{index+1}] ✅ 正常: Site {site} 測出 {value}")
             
-            # 放慢迴圈速度，模擬真實機台運作節奏
+            # 放慢迴圈速度，讓你有時間打開瀏覽器看 JSON 變化
             time.sleep(0.5) 
 
     simulate_oneapi_stream("data/example.csv")

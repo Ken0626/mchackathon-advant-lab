@@ -1,53 +1,128 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+import json
+import time
 
-def load_and_simulate(csv_path):
-    # 1. 讀取 Meta Data (High / Low Limits)
-    df_meta = pd.read_csv(csv_path, nrows=3)
-    # 取出 220_Main.Suite1#CP 的上下限
-    target_param = "220_Main.Suite1#CP"
-    high_limit = float(df_meta.iloc[1][target_param])
-    low_limit = float(df_meta.iloc[2][target_param])
-    
-    print(f"[{target_param}] 規格範圍: {low_limit} ~ {high_limit}")
+class AnomalyDetector:
+    def __init__(self, window_size=16):
+        self.window_size = window_size
+        self.sliding_window = []
+        self.baseline_std = None
 
-    # 2. 讀取實際機台數據 (跳過第 1 到 3 列，保留第 0 列標頭)
-    df_data = pd.read_csv(csv_path, skiprows=[1, 2, 3])
-    
-    sliding_window = []
-    window_size = 12 # 假設每累積 12 筆資料 (約 3 個輪次) 檢查一次
-    
-    # 3. 模擬即時資料流
-    for index, row in df_data.iterrows():
-        current_data = {
-            "site": int(row["Site"]),
-            "value": float(row[target_param])
+    def create_decision(self, is_anomaly, anomaly_type="Normal", action="none", reason=""):
+        return {
+            "is_anomaly": is_anomaly,
+            "anomaly_type": anomaly_type,
+            "action": action,
+            "reason": reason
         }
-        sliding_window.append(current_data)
+
+    def process_new_data(self, site, value, param_name="220_Main.Suite1#CP"):
+        self.sliding_window.append({"site": site, "value": value})
         
-        if len(sliding_window) > window_size:
-            sliding_window.pop(0) # 剔除最舊的資料，維持窗口大小
+        if len(self.sliding_window) > self.window_size:
+            self.sliding_window.pop(0)
             
-        if len(sliding_window) == window_size:
-            check_site_unbalance(sliding_window, target_param)
+        if len(self.sliding_window) < self.window_size:
+            return []
+            
+        df_window = pd.DataFrame(self.sliding_window)
+        
+        if self.baseline_std is None:
+            self.baseline_std = df_window['value'].std()
+            if self.baseline_std == 0:
+                self.baseline_std = 0.01 
+                
+        decisions = [
+            self.check_site_unbalance(df_window, param_name),
+            self.check_trend(df_window, threshold=0.1),
+            self.check_std_trend(df_window, std_multiplier_threshold=2.0),
+            self.check_value_shift(df_window, shift_threshold=0.2)
+        ]
+        
+        return [d for d in decisions if d["is_anomaly"]]
 
-def check_site_unbalance(window, param_name):
-    # 將窗口內的資料轉換為 DataFrame 方便分組計算
-    df_window = pd.DataFrame(window)
-    
-    # 計算這個窗口內，各個 Site 的平均值
-    site_means = df_window.groupby('site')['value'].mean()
-    overall_mean = df_window['value'].mean()
-    overall_std = df_window['value'].std()
-    
-    # 檢查是否有特定 Site 的平均值，偏離整體平均值超過 1.5 倍標準差
-    for site, mean_val in site_means.items():
-        if abs(mean_val - overall_mean) > (1.5 * overall_std):
-            print(f"⚠️ [警報] Site 2 Site Unbalance 觸發！")
-            print(f"異常參數: {param_name}, 異常 Site: {site}")
-            print(f"該 Site 平均值: {mean_val:.3f}, 整體平均值: {overall_mean:.3f}\n")
-            # 實務上這裡會 return 一個 JSON 格式的決策給正賢的 ONEAPI 模組
+    def check_site_unbalance(self, df_window, param_name, std_multiplier=1.5):
+        site_means = df_window.groupby('site')['value'].mean()
+        overall_mean = df_window['value'].mean()
+        overall_std = df_window['value'].std()
+        for site, mean_val in site_means.items():
+            if overall_std > 0 and abs(mean_val - overall_mean) > (std_multiplier * overall_std):
+                return self.create_decision(True, "Site 2 Site Unbalance", "set_message", f"異常 Site: {site}")
+        return self.create_decision(False)
 
+    def check_trend(self, df_window, threshold=0.1):
+        for site, group in df_window.groupby('site'):
+            if len(group) < 3: continue
+            y = group['value'].values
+            x = np.arange(len(y))
+            slope, _ = np.polyfit(x, y, 1)
+            if abs(slope) > threshold:
+                direction = "up" if slope > 0 else "down"
+                return self.create_decision(True, f"Trend {direction}", "set_message", f"Site {site} 斜率達 {slope:.3f}")
+        return self.create_decision(False)
+
+    def check_std_trend(self, df_window, std_multiplier_threshold=2.0):
+        for site, group in df_window.groupby('site'):
+            current_std = group['value'].std()
+            if pd.isna(current_std): continue
+            if current_std > (self.baseline_std * std_multiplier_threshold):
+                return self.create_decision(True, "Standard Deviation Trend Change", "set_message", f"Site {site} 標準差異常")
+        return self.create_decision(False)
+
+    def check_value_shift(self, df_window, shift_threshold=0.2):
+        for site, group in df_window.groupby('site'):
+            if len(group) < 4: continue
+            mid_point = len(group) // 2
+            diff = group['value'].iloc[mid_point:].mean() - group['value'].iloc[:mid_point].mean()
+            if abs(diff) > shift_threshold:
+                direction = "向上" if diff > 0 else "向下"
+                return self.create_decision(True, "Measure Value Shift", "set_pause", f"Site {site} 發生 {direction} 偏移")
+        return self.create_decision(False)
+
+# ================= 執行主程式 (測試與產生 JSON 檔) ================= #
 if __name__ == "__main__":
-    # 請確保上一回合的測試資料存放在 data/example.csv
-    load_and_simulate("data/example.csv")
+    def simulate_oneapi_stream(csv_path):
+        df_data = pd.read_csv(csv_path, skiprows=[1, 2, 3])
+        target_param = "220_Main.Suite1#CP"
+        
+        # 定義給心靈的共用狀態字典
+        dashboard_state = {
+            "current_window": [],  
+            "alerts": [],          
+            "limits": {            
+                "high": 1.8, 
+                "low": 0.6
+            }
+        }
+        
+        # 初始化你的檢測器
+        detector = AnomalyDetector(window_size=16)
+        print("⏳ 開始模擬機台生產數據，並即時覆寫 dashboard_status.json ...\n")
+        
+        # 模擬 OneAPI 監聽到機台不斷送出新資料
+        for index, row in df_data.iterrows():
+            site = int(row["Site"])
+            value = float(row[target_param])
+            
+            # 取得決策清單
+            alerts = detector.process_new_data(site, value, target_param)
+            
+            # 更新全域字典
+            dashboard_state["current_window"] = detector.sliding_window
+            dashboard_state["alerts"] = alerts
+            
+            # 寫入 JSON 檔給前端讀取
+            with open("dashboard_status.json", "w", encoding="utf-8") as f:
+                json.dump(dashboard_state, f, ensure_ascii=False, indent=2)
+            
+            # 終端機提示
+            if alerts:
+                print(f"[{index+1}] 🚨 觸發異常: {alerts[0]['anomaly_type']} (已寫入 JSON)")
+            else:
+                print(f"[{index+1}] ✅ 正常: Site {site} 測出 {value:.3f} (已寫入 JSON)")
+            
+            # 放慢迴圈速度，模擬真實機台運作
+            time.sleep(0.5) 
+
+    simulate_oneapi_stream("data/example.csv")
