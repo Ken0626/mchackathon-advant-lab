@@ -1,12 +1,6 @@
 pytz==2023.3
 numpy==2.2.6
-<<<<<<< HEAD
 scipy==1.15.3
 scikit-learn==1.7.2
 joblib==1.6.0
 pandas==2.3.3
-=======
-pandas==2.3.3
-scikit-learn==1.7.2
-joblib==1.6.0
->>>>>>> 25779bc99223e1d59262be16457909b5d42134f0
