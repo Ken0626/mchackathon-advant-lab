@@ -22,6 +22,20 @@ from oneapi import DFFData
 from oneapi import QueryResponse
 from oneapi import DFF
 from libACSAction import ActionManager
+from rtdi_bridge import RtdiBridge, column_name, format_prediction, format_alert
+
+# 量產時每顆 die 有 ~3000 個測項，原範例會把每個欄位都 print 出來，
+# 手冊 1.1.3.2 NOTE1 說 consumeData 會阻塞執行緒，全印會直接拖垮資料流。
+# 這裡把 sample.py 內的 print 整個靜音，需要除錯時設 APP_VERBOSE=1。
+VERBOSE = os.environ.get("APP_VERBOSE", "0") == "1"
+PREDICT_WAIT = int(os.environ.get("PREDICT_WAIT", "10"))   # set_wait 的秒數，沿用題目範例
+
+_real_print = print
+
+
+def print(*args, **kwargs):          # noqa: A001  只覆蓋本模組
+    if VERBOSE:
+        _real_print(*args, **kwargs)
 
 # Define callback as a global function, don’t define an inner function.
 # def onUploadComplete(result, properties, data):
@@ -97,6 +111,9 @@ class SampleMonitor(Monitor):
         Monitor.__init__(self)
         self.mTouchdownCnt = 0
         self.fileTransfer = FileTransfer.FileTransfer()
+        self.bridge = RtdiBridge()
+        self.sites = [1, 2, 3, 4]
+        self.testerId = None   # 最近一次事件的機台名稱，給 set_message 用
 
     # derive callback func for NexusTPI::send
     def consumeTPSend(self, tc, data):
@@ -127,6 +144,18 @@ class SampleMonitor(Monitor):
         elif key_action == "list":
             response=ActionManager.get(tc.testerId)
             print(f"Get Action: {response}")
+        elif key == "predict":
+            # 場景二：測試程式送編號 1~6，依這顆 die 目前已測到的資料預測各 site 溫度
+            predict_num = int(data)
+            try:
+                site_values = self.bridge.predict(predict_num)
+            except Exception:
+                logging.exception(f"predict {predict_num} 失敗")
+                site_values = [(s, 0.0) for s in self.sites]
+            message = format_prediction(predict_num, site_values)
+            logging.info(message)
+            ActionManager.set_wait(tc.testerId, PREDICT_WAIT, message)
+            response = ActionManager.get(tc.testerId)
         elif key == "reset_td":
             self.mTouchdownCnt = 0
         elif isTP_report == True:
@@ -236,6 +265,8 @@ class SampleMonitor(Monitor):
         print(f"get_HeadNumber = {data.get_HeadNumber()}")
         print(f"get_SiteGroupNumber = {data.get_SiteGroupNumber()}")
         print(f"get_WaferId = {data.get_WaferId()}")
+        # 換片：清空滑動視窗與累計良率，否則上一片的資料會污染這一片
+        self.bridge.on_wafer_start(data.get_WaferId())
 
     def consumeWaferEnd(self, data):
         print(sys._getframe().f_code.co_name)
@@ -248,12 +279,20 @@ class SampleMonitor(Monitor):
         print(f"get_WaferId = {data.get_WaferId()}")
         print(f"get_UserDescription = {data.get_UserDescription()}")
         print(f"get_ExecDescription = {data.get_ExecDescription()}")
+        self.bridge.on_wafer_end()
 
     def consumeTestStart(self, data):
-        print(sys._getframe().f_code.co_name)
         self.mTouchdownCnt += 1
-        print(f"get_TimeStamp = {data.get_TimeStamp()}")
         cnt = data.get_ResultCount()
+        sites = [toSite(data.query_HeadSite(i)) for i in range(0, cnt)]
+        if sites:
+            self.sites = sites
+        self.bridge.on_test_start(sites)
+
+        if not VERBOSE:
+            return                     # 量產時到此為止，下面純粹是除錯輸出
+        print(sys._getframe().f_code.co_name)
+        print(f"get_TimeStamp = {data.get_TimeStamp()}")
         print(f"get_ResultCount = {cnt}")
         for index in range(0, cnt):
             tempU32 = data.query_HeadSite(index)
@@ -262,9 +301,21 @@ class SampleMonitor(Monitor):
             print(f"query_YCoord = {data.query_YCoord(index)}")
 
     def consumeTestEnd(self, data):
-        print(sys._getframe().f_code.co_name)        
-        print(f"get_TimeStamp = {data.get_TimeStamp()}")
         cnt = data.get_ResultCount()
+        site_results = []
+        for index in range(0, cnt):
+            tempU32 = data.query_HeadSite(index)
+            # 訓練資料 PF==0 的 die 全部是 SBin 1，所以 SBin 1 即為 pass
+            site_results.append((toSite(tempU32), data.query_SBinResult(index) == 1))
+
+        # 場景一：一次 touchdown 測完，整包交給偵測器
+        for alert in self.bridge.on_test_end(site_results):
+            self.notify(alert)
+
+        if not VERBOSE:
+            return                     # 量產時到此為止，下面純粹是除錯輸出
+        print(sys._getframe().f_code.co_name)
+        print(f"get_TimeStamp = {data.get_TimeStamp()}")
         print(f"get_ResultCount = {cnt}")
         for index in range(0, cnt):
             tempU32 = data.query_HeadSite(index)
@@ -279,6 +330,23 @@ class SampleMonitor(Monitor):
             print(f"query_PartId = {data.query_PartId(index)}")
             print(f"query_PartText = {data.query_PartText(index)}")
 
+    def notify(self, alert):
+        """把異常通知機台（題目「重要事項(3)」：用 ActionManager.set_message）。"""
+        det = self.bridge.detector
+        text = format_alert(alert, self.bridge.wafer_id,
+                            det.total_count if det else None)
+        logging.warning(text)
+        if self.testerId is None:
+            logging.error("尚未收到任何帶 testerId 的事件，無法通知機台")
+            return
+        ActionManager.set_message(self.testerId, text)
+        if self.bridge.should_pause(alert):
+            # 手冊 p.7 有 set_pause，但 p.68 的表沒寫參數；失敗就只留 set_message
+            try:
+                ActionManager.set_pause(self.testerId, text[:200])
+            except Exception:
+                logging.exception("set_pause 失敗，只送 set_message")
+
     def consumeTestFlowStart(self, data):
         print(sys._getframe().f_code.co_name)
         print(f"get_TimeStamp = {data.get_TimeStamp()}")
@@ -290,8 +358,18 @@ class SampleMonitor(Monitor):
         print(f"get_TestFlowName = {data.get_TestFlowName()}")
 
     def consumeParametricTest(self, data):
-        print(sys._getframe().f_code.co_name)
         cnt = data.get_ResultCount()
+        for index in range(0, cnt):
+            tempU32 = data.query_HeadSite(index)
+            # 欄位名稱 = <test number>_<test suite>，沒有 pin
+            self.bridge.add_result(
+                toSite(tempU32),
+                column_name(data.query_TestNumber(index), data.query_TestSuite(index)),
+                data.query_Result(index))
+
+        if not VERBOSE:
+            return                     # 量產時到此為止，下面純粹是除錯輸出
+        print(sys._getframe().f_code.co_name)
         print(f"get_ResultCount = {cnt}")
         for index in range(0, cnt):
             tempU32 = data.query_HeadSite(index)
@@ -311,8 +389,18 @@ class SampleMonitor(Monitor):
             print(f"query_MeasurementName = {data.query_MeasurementName(index)}")
 
     def consumeFunctionalTest(self, data):
-        print(sys._getframe().f_code.co_name)
         cnt = data.get_ResultCount()
+        for index in range(0, cnt):
+            tempU32 = data.query_HeadSite(index)
+            # CSV 裡 functional 欄（例 540_Main.Suite13）沒有 pin，值 0 = pass
+            self.bridge.add_result(
+                toSite(tempU32),
+                column_name(data.query_TestNumber(index), data.query_TestSuite(index)),
+                data.query_NumberFail(index))
+
+        if not VERBOSE:
+            return                     # 量產時到此為止，下面純粹是除錯輸出
+        print(sys._getframe().f_code.co_name)
         print(f"get_ResultCount = {cnt}")
         for index in range(0, cnt):
             tempU32 = data.query_HeadSite(index)
@@ -336,8 +424,21 @@ class SampleMonitor(Monitor):
             print(f"query_MeasurementName = {data.query_MeasurementName(index)}")
 
     def consumeMultiParametric(self, data):
-        print(sys._getframe().f_code.co_name)
         cnt = data.get_ResultCount()
+        for index in range(0, cnt):
+            tempU32 = data.query_HeadSite(index)
+            # 3035 個訓練測項幾乎都從這裡進來，欄位名 = <test number>_<test suite>#<pin>
+            num = data.query_TestNumber(index)
+            suite = data.query_TestSuite(index)
+            values = list(data.query_Results(index))
+            pinIDs = list(data.query_PinResults(index))
+            for i, value in enumerate(values):
+                pin = data.query_PinName(pinIDs[i]) if i < len(pinIDs) else None
+                self.bridge.add_result(toSite(tempU32), column_name(num, suite, pin), value)
+
+        if not VERBOSE:
+            return                     # 量產時到此為止，下面純粹是除錯輸出
+        print(sys._getframe().f_code.co_name)
         print(f"get_ResultCount = {cnt}")
         for index in range(0, cnt):
             tempU32 = data.query_HeadSite(index)
@@ -462,8 +563,17 @@ class SampleMonitor(Monitor):
         print(f"get_ReleaseTesterTimeStamp = {data.get_ReleaseTesterTimeStamp()}")
 
     def consumeData(self, tc, data):
-        print(f"====== consume data from: testerId = {tc.testerId} =======")
-        datatype = data.getType()
+        # 手冊 1.1.3.2 NOTE1：這裡丟例外會卡住 ONEAPI 的執行緒 -> 一律吞掉並記錄
+        try:
+            self.testerId = tc.testerId
+            self._dispatch(tc, data)
+        except Exception:
+            logging.exception("consumeData 發生例外")
+
+    def _dispatch(self, tc, data):
+        datatype = data.getType()   # 手冊 1.1.3.4.1：必須最先呼叫
+        if VERBOSE:
+            print(f"====== consume data from: testerId = {tc.testerId} =======")
         if datatype == DataType.DATA_TYP_PRODUCTION_LOTSTART:
             self.consumeLotStart(data)
         elif datatype == DataType.DATA_TYP_PRODUCTION_LOTEND:

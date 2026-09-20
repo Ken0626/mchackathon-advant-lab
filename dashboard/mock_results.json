@@ -1,0 +1,38 @@
+[
+  {
+    "site": 1,
+    "test_number": "220",
+    "value": 1.251,
+    "is_anomaly": false,
+    "anomaly_type": null,
+    "action": "none",
+    "reason": ""
+  },
+  {
+    "site": 2,
+    "test_number": "220",
+    "value": 1.28,
+    "is_anomaly": false,
+    "anomaly_type": null,
+    "action": "none",
+    "reason": ""
+  },
+  {
+    "site": 3,
+    "test_number": "220",
+    "value": 1.9,
+    "is_anomaly": true,
+    "anomaly_type": "Global Feature Anomaly",
+    "action": "set_pause",
+    "reason": "MSE 0.0089 超出閾值 0.0063"
+  },
+  {
+    "site": 4,
+    "test_number": "220",
+    "value": 1.243,
+    "is_anomaly": false,
+    "anomaly_type": null,
+    "action": "none",
+    "reason": ""
+  }
+]

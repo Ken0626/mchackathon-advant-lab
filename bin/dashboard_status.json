@@ -1,0 +1,34 @@
+{
+  "wafer_id": 7,
+  "device_count": 8,
+  "yield": 75.0,
+  "monitor_test": "220_Main.Suite1#CP",
+  "alerts": [
+    {
+      "is_anomaly": true,
+      "anomaly_type": "Low Yield",
+      "action": "set_pause",
+      "reason": "本片累計良率 62.5%（已測 8 顆），低於 80% 門檻"
+    }
+  ],
+  "scores": {
+    "mean_shift": 1.2
+  },
+  "thresholds": {
+    "mean_shift": 3.0
+  },
+  "current_window": [],
+  "limits": {
+    "high": 1.8,
+    "low": 0.6
+  },
+  "temperature": {
+    "latest": {},
+    "history": {},
+    "unit": "C",
+    "mae": {
+      "1": 0.42
+    }
+  },
+  "updated_at": "2026-09-20T10:32:55"
+}
