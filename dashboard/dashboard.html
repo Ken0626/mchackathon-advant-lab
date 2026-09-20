@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RTDI 即時異常監控系統 - AMIGO 組別 03</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* 三層明度階層，取代單一黑色平面 */
+    --void: #05070a;
+    --bg-main: #0a0d12;
+    --panel-bg: #12161d;
+    --panel-raised: #1a2029;
+    --panel-border: #262e3a;
+    --panel-border-soft: #1c222c;
+
+    --wine-red: #9b2449;
+    --wine-glow: #d13d68;
+    --wine-dim: rgba(155, 36, 73, .16);
+
+    --text-main: #f2f4f7;
+    --text-dim: #8891a0;
+    --text-faint: #52596a;
+
+    --ok-color: #2fb673;
+    --ok-dim: rgba(47, 182, 115, .14);
+    --warn-color: #dc9a2e;
+    --warn-dim: rgba(220, 154, 46, .14);
+    --crit-color: #ff5a52;
+    --crit-dim: rgba(255, 90, 82, .14);
+    --info-color: #5b9dff;
+
+    --font-ui: "Inter", "Noto Sans TC", sans-serif;
+    --font-data: "IBM Plex Mono", "SF Mono", monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg-main);
+    color: var(--text-main);
+    font-family: var(--font-ui);
+    overflow: hidden;
+  }
+  button { font-family: inherit; }
+  :focus-visible { outline: 2px solid var(--info-color); outline-offset: 2px; }
+  .dim { color: var(--text-dim); }
+  .mono { font-family: var(--font-data); }
+
+  /* ── 頂部列 ── */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 56px; padding: 0 24px;
+    background: var(--void);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .brand { font-family: var(--font-data); font-size: 13px; font-weight: 500; letter-spacing: 0.02em; display: flex; align-items: center; gap: 10px; color: var(--text-dim); }
+  .brand b { color: var(--text-main); font-weight: 600; }
+  .brand span { color: var(--wine-glow); }
+  .sys-info { display: flex; gap: 10px; font-size: 11px; color: var(--text-dim); font-family: var(--font-data); }
+  .badge {
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    padding: 4px 10px; border-radius: 3px; display: flex; align-items: center; gap: 6px; color: var(--text-dim);
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex: none; }
+  #conn-badge[data-mode="live"]    { border-color: var(--ok-color);   background: var(--ok-dim); color: var(--text-main); }
+  #conn-badge[data-mode="live"] .dot    { background: var(--ok-color); box-shadow: 0 0 6px var(--ok-color); }
+  #conn-badge[data-mode="stale"],
+  #conn-badge[data-mode="demo"]    { border-color: var(--warn-color); background: var(--warn-dim); color: var(--text-main); }
+  #conn-badge[data-mode="stale"] .dot,
+  #conn-badge[data-mode="demo"] .dot    { background: var(--warn-color); }
+  #conn-badge[data-mode="offline"] { border-color: var(--crit-color); background: var(--crit-dim); color: var(--text-main); }
+  #conn-badge[data-mode="offline"] .dot { background: var(--crit-color); box-shadow: 0 0 6px var(--crit-color); }
+
+  /* ── 主動示警橫幅：只在有未確認的嚴重異常時出現，強制拉走注意力 ── */
+  #critical-strip {
+    display: none; align-items: center; gap: 14px;
+    padding: 10px 24px; background: var(--crit-color); color: #2a0806;
+    font-size: 13px; font-weight: 600;
+  }
+  #critical-strip.show { display: flex; animation: strip-in .25s ease; }
+  #critical-strip .cs-icon { font-size: 16px; animation: strip-blink 1s step-start infinite; }
+  #critical-strip .cs-detail { font-weight: 400; opacity: .85; font-family: var(--font-data); font-size: 11px; }
+  #critical-strip button {
+    margin-left: auto; background: rgba(0,0,0,.25); border: 1px solid rgba(0,0,0,.35); color: inherit;
+    padding: 4px 12px; border-radius: 3px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  @keyframes strip-in { from { transform: translateY(-100%); } to { transform: translateY(0); } }
+  @keyframes strip-blink { 50% { opacity: .3; } }
+
+  /* ── 版面 ── */
+  .main-layout { display: grid; grid-template-columns: 1fr 380px; height: calc(100vh - 56px); }
+  .stage-area { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; background: var(--bg-main); }
+
+  .banner {
+    display: none; padding: 8px 14px; border-radius: 3px; font-size: 12px;
+    border: 1px solid var(--crit-color); background: var(--crit-dim); color: #ff9b96;
+  }
+  .banner.show { display: block; }
+  .banner.demo { border-color: var(--warn-color); background: var(--warn-dim); color: #f0be6f; }
+
+  .metrics-ribbon { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--panel-border); border: 1px solid var(--panel-border); border-radius: 5px; overflow: hidden; }
+  .metric-card {
+    background: var(--panel-bg); padding: 12px 16px; min-width: 0;
+  }
+  .metric-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; }
+  .metric-card .value { font-family: var(--font-data); font-size: 21px; font-weight: 500; margin-top: 5px; color: var(--text-main); white-space: nowrap; }
+  .metric-card .sub { font-size: 11px; font-weight: 400; color: var(--text-faint); margin-left: 6px; }
+  .metric-card .note { font-size: 10px; color: var(--text-dim); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-data); }
+  .metric-card.status-critical { background: var(--crit-dim); }
+  .progress { height: 3px; background: var(--void); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+  .progress > div { height: 100%; background: var(--info-color); width: 0; transition: width .25s linear; }
+
+  .panel {
+    background: var(--panel-bg); border: 1px solid var(--panel-border-soft);
+    border-radius: 5px; padding: 14px 16px; transition: opacity .2s;
+  }
+  body[data-mode="offline"] .panel { opacity: .45; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; padding-bottom: 9px; border-bottom: 1px solid var(--panel-border-soft); }
+  .panel-head h3 { margin: 0; font-size: 11px; letter-spacing: 0.05em; color: var(--text-dim); font-weight: 600; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .panel-head .hint { font-size: 10.5px; color: var(--text-faint); font-family: var(--font-data); white-space: nowrap; }
+  .panel-head label { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+
+  /* 分數 vs 門檻 */
+  .score-row { display: grid; grid-template-columns: 140px 1fr 160px; gap: 14px; align-items: center; padding: 6px 0; font-size: 12px; }
+  .score-row + .score-row { border-top: 1px solid var(--panel-border-soft); }
+  .score-label b { font-weight: 600; font-family: var(--font-data); }
+  .score-label span { display: block; font-size: 10px; color: var(--text-faint); }
+  .track { position: relative; height: 8px; background: var(--void); border-radius: 2px; }
+  .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--info-color); border-radius: 2px; transition: width .25s ease; }
+  .fill.warming {
+    background: repeating-linear-gradient(45deg, var(--text-faint), var(--text-faint) 4px, transparent 4px, transparent 8px);
+    opacity: .5;
+  }
+  .score-row.over .fill { background: var(--crit-color); }
+  .thr { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text-main); opacity: .6; }
+  .score-num { text-align: right; white-space: nowrap; font-family: var(--font-data); }
+  .over-tag { color: var(--crit-color); font-weight: 600; margin-left: 6px; font-family: var(--font-ui); }
+
+  /* 折線圖 */
+  .chart-panel { flex: 1; min-height: 240px; display: flex; flex-direction: column; }
+  #chart { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+  #chart svg { display: block; }
+  .legend-row { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 11px; min-height: 16px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-data); }
+  .chip i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+
+  /* 分頁 */
+  .tabs { display: flex; gap: 2px; background: var(--void); border-radius: 4px; padding: 2px; }
+  .tab {
+    background: transparent; border: none; color: var(--text-dim);
+    padding: 5px 14px; font-size: 12px; border-radius: 3px; cursor: pointer;
+  }
+  .tab:hover { color: var(--text-main); }
+  .tab[aria-selected="true"] { color: var(--text-main); background: var(--panel-raised); }
+  .tab-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .tab-pane[hidden] { display: none; }
+  .chart-sub { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; font-family: var(--font-data); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 溫度預測表 */
+  .temp-note { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; line-height: 1.6; }
+  .temp-note .bad { color: var(--crit-color); }
+  .temp-wrap { flex: 1; min-height: 0; overflow: auto; }
+  table.temp { border-collapse: separate; border-spacing: 4px; width: 100%; font-size: 12px; font-family: var(--font-data); }
+  table.temp th { font-weight: 600; color: var(--text-dim); font-size: 11px; text-align: center; padding: 2px 4px; font-family: var(--font-ui); }
+  table.temp th.row { text-align: left; white-space: nowrap; }
+  table.temp td { text-align: center; padding: 8px 4px; border-radius: 3px; border: 1px solid var(--panel-border); }
+  table.temp td.na { color: var(--text-faint); background: var(--void); }
+  table.temp td.bad { border-color: var(--crit-color); color: var(--crit-color); }
+  table.temp tr.avg td { font-weight: 600; border-style: dashed; }
+  .zh { display: block; font-size: 10px; font-weight: 400; color: var(--text-faint); font-family: var(--font-ui); }
+
+  /* ── 側邊欄 ── */
+  .sidebar {
+    background: var(--void); border-left: 1px solid var(--panel-border);
+    display: flex; flex-direction: column; padding: 18px; gap: 10px; overflow-y: auto;
+  }
+  .sidebar h3 {
+    font-size: 11px; letter-spacing: 0.05em; color: var(--text-dim); margin: 0 0 2px 0; text-transform: uppercase;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #log-container { display: flex; flex-direction: column; gap: 10px; }
+
+  .log-card {
+    background: var(--panel-bg); border: 1px solid var(--panel-border-soft);
+    border-radius: 5px; padding: 0;
+    font-size: 12px; line-height: 1.5; overflow: hidden;
+    display: flex;
+  }
+  .log-card .sev-bar { width: 4px; flex: none; background: var(--text-faint); }
+  .log-card .card-body { padding: 11px 13px; flex: 1; min-width: 0; }
+  .log-card.anomaly  { border-color: var(--warn-color); background: var(--warn-dim); }
+  .log-card.anomaly .sev-bar { background: var(--warn-color); }
+  .log-card.critical { border-color: var(--crit-color); background: var(--crit-dim); }
+  .log-card.critical .sev-bar { background: var(--crit-color); }
+  .log-card.acked { opacity: 0.55; }
+  .log-card.resolved:not(.acked) { border-color: var(--ok-color); background: var(--ok-dim); }
+  .log-card.resolved .sev-bar { background: var(--ok-color); }
+
+  .log-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; font-weight: 600; margin-bottom: 4px; }
+  .action-tag {
+    font-size: 9px; padding: 3px 7px; border-radius: 2px; font-weight: 700; letter-spacing: .03em;
+    background: var(--crit-color); color: #2a0806; white-space: nowrap;
+  }
+  .log-card.anomaly .action-tag { background: var(--warn-color); color: #2b1a02; }
+  .state-tag { font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .state-tag.on { color: var(--crit-color); }
+  .reason-box { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--panel-border); color: var(--text-dim); font-size: 11px; }
+
+  details { margin-top: 8px; background: var(--void); border: 1px solid var(--panel-border); border-radius: 3px; padding: 6px 8px; }
+  summary { cursor: pointer; font-size: 11px; color: var(--text-dim); }
+  .items { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .items li { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; font-family: var(--font-data); }
+  .items .t { word-break: break-all; }
+  .items .z { color: var(--crit-color); font-weight: 600; white-space: nowrap; }
+
+  .card-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .btn {
+    flex: 1; background: var(--text-main); border: none; color: var(--void);
+    padding: 6px; font-size: 11px; font-weight: 600; border-radius: 3px; cursor: pointer; transition: opacity .15s;
+  }
+  .btn:hover { opacity: .82; }
+  .ack-done { font-size: 10px; color: var(--text-faint); margin-top: 6px; text-align: right; }
+
+  .empty-state { text-align: center; color: var(--text-dim); padding: 30px 0; font-size: 12px; }
+
+  /* ── 溫度切換鈕 ── */
+  .view-toggle { display: flex; gap: 2px; background: var(--void); border-radius: 4px; padding: 2px; }
+  .view-toggle button {
+    background: transparent; border: none; color: var(--text-dim);
+    padding: 4px 10px; font-size: 11px; border-radius: 3px; cursor: pointer;
+  }
+  .view-toggle button.active { color: var(--text-main); background: var(--panel-raised); }
+
+  /* ── 六邊形蜂巢溫度圖 ── */
+  .hex-wrap { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 16px 0; }
+  .hex-grid { display: flex; flex-direction: column; gap: 2px; }
+  .hex-row { display: flex; gap: 4px; }
+  .hex-row:nth-child(even) { margin-left: 33px; }
+  .hex {
+    position: relative; width: 64px; height: 56px;
+    clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+    border: 1px solid rgba(0,0,0,.4);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 10px; cursor: default; transition: transform .15s ease, filter .15s ease;
+  }
+  .hex:hover { transform: scale(1.1); z-index: 2; filter: brightness(1.15); }
+  .hex-col-labels { display: flex; gap: 4px; margin-bottom: 4px; }
+  .hex-col-labels span { width: 64px; text-align: center; font-size: 9px; color: var(--text-dim); letter-spacing: .03em; }
+  .hex-axis-corner { width: 56px; flex: 0 0 56px; }
+  .hex b { font-size: 12px; font-weight: 600; }
+  .hex .hex-tag { font-size: 8px; opacity: .75; margin-top: 1px; }
+  .hex.hex-hot { animation: hexpulse 1.1s ease-in-out infinite; }
+  @keyframes hexpulse { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.35); } }
+  .hex.na { background: var(--panel-bg); border: 1px dashed var(--panel-border); color: var(--text-dim); }
+
+  .hex-row-label { font-size: 9px; color: var(--text-dim); width: 56px; text-align: right; padding-right: 6px; align-self: center; }
+  .hex-layout { display: flex; gap: 4px; }
+
+  .hex-tooltip {
+    position: fixed; pointer-events: none; z-index: 50;
+    background: #05070a; border: 1px solid var(--panel-border); border-radius: 4px;
+    padding: 8px 10px; font-size: 11px; line-height: 1.6; max-width: 220px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5); display: none;
+  }
+  .hex-tooltip b { color: var(--text-main); }
+  .hex-tooltip .dim { display: block; margin-top: 2px; }
+
+  .hex-scale-row { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 10px; color: var(--text-dim); }
+  .hex-scale-bar { width: 220px; height: 10px; border-radius: 2px; background: linear-gradient(90deg, #2b6cb0, #38a169 50%, #f85149); position: relative; }
+  .hex-scale-ticks { width: 220px; display: flex; justify-content: space-between; }
+  .hex-scale-ticks span::before { content: ""; display: block; width: 1px; height: 4px; background: var(--panel-border); margin: 0 auto 2px; }
+
+  /* ── 異常警示彈窗（toast） ── */
+  /* 定位在主內容區域上方，刻意避開右側側邊欄，才不會蓋住下面持續存在的異常清單 */
+  /* 改到主內容區左下角：頂部已經有主動示警橫幅+關鍵指標，這裡是畫面上最不重要的角落，
+     短暫出現也不會擋到任何正在看的資訊 */
+  #toast-stack {
+    position: fixed; bottom: 20px; left: 20px; z-index: 100;
+    display: flex; flex-direction: column; gap: 8px;
+    width: clamp(220px, 26vw, 300px);
+    pointer-events: none;
+  }
+  @media (max-width: 900px) {
+    #toast-stack { left: 16px; right: 16px; width: auto; }
+  }
+  .toast {
+    pointer-events: auto;
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-left: 3px solid var(--warn-color); border-radius: 5px;
+    padding: 8px 12px; font-size: 11.5px; line-height: 1.4;
+    box-shadow: 0 8px 22px rgba(0,0,0,.5);
+    animation: toast-in .25s cubic-bezier(.2,.8,.3,1);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .toast.critical { border-left-color: var(--crit-color); animation: toast-in .25s cubic-bezier(.2,.8,.3,1), toast-shake .45s ease .25s; }
+  .toast.leaving { animation: toast-out .2s ease forwards; }
+  @keyframes toast-in { from { transform: translateY(14px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  @keyframes toast-out { to { transform: translateY(10px); opacity: 0; } }
+  @keyframes toast-shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+  .toast-head { display: flex; align-items: center; gap: 8px; font-weight: 600; flex: 1; min-width: 0; }
+  .toast-head > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toast-head .toast-tag { font-size: 9px; padding: 2px 6px; border-radius: 2px; background: rgba(220,154,46,.2); color: var(--warn-color); white-space: nowrap; flex: none; }
+  .toast.critical .toast-head .toast-tag { background: rgba(255,90,82,.2); color: var(--crit-color); }
+  .toast-body { display: none; }
+  .toast-close { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 13px; line-height: 1; padding: 0; flex: none; }
+  .toast-close:hover { color: var(--text-main); }
+  .toast-more { pointer-events: auto; text-align: center; font-size: 10.5px; color: var(--text-dim); background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 5px; padding: 5px; }
+
+  @media (max-width: 1000px) {
+    html, body { overflow: auto; }
+    .main-layout { grid-template-columns: 1fr; height: auto; }
+    .metrics-ribbon { grid-template-columns: repeat(2, 1fr); }
+    .score-row { grid-template-columns: 1fr; gap: 4px; }
+    .score-num { text-align: left; }
+    .chart-panel { min-height: 320px; }
+  }
+</style>
+</head>
+<body data-mode="connecting">
+
+<div class="topbar">
+  <div class="brand"><b>ADVANTEST RTDI</b><span>組別 03 · AMIGO</span></div>
+  <div class="sys-info">
+    <div class="badge" id="conn-badge" data-mode="connecting" role="status" aria-live="polite">
+      <span class="dot"></span><span id="conn-text">連線中…</span>
+    </div>
+    <div class="badge">CP Parametric</div>
+  </div>
+</div>
+
+<div id="critical-strip" role="alert">
+  <span class="cs-icon">⏸</span>
+  <span id="cs-text">建議暫停機台</span>
+  <span class="cs-detail" id="cs-detail"></span>
+  <button id="cs-jump">查看詳情</button>
+</div>
+
+<div id="toast-stack"></div>
+<div class="hex-tooltip" id="hex-tooltip"></div>
+
+<div class="main-layout">
+  <div class="stage-area">
+    <div class="banner" id="banner"></div>
+
+    <div class="metrics-ribbon">
+      <div class="metric-card">
+        <div class="label">目前 Wafer</div>
+        <div class="value" id="m-wafer">—</div>
+        <div class="note" id="m-test" title="">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="label">已測顆數 (Devices)</div>
+        <div class="value" id="m-devices">—</div>
+        <div class="progress"><div id="m-progress"></div></div>
+      </div>
+      <div class="metric-card">
+        <div class="label">累計良率 (Yield)</div>
+        <div class="value" id="m-yield">—</div>
+      </div>
+      <div class="metric-card">
+        <div class="label">機台互動狀態</div>
+        <div class="value" id="m-status" style="font-size: 14px; padding-top: 4px; color: var(--info-color);">—</div>
+      </div>
+    </div>
+
+    <section class="panel" aria-labelledby="scores-title">
+      <div class="panel-head">
+        <h3 id="scores-title">異常分數 vs 門檻</h3>
+        <span class="hint" id="scores-note"></span>
+      </div>
+      <div id="scores"><div class="empty-state">等待資料…</div></div>
+    </section>
+
+    <section class="panel chart-panel" aria-label="趨勢與預測">
+      <div class="panel-head">
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" id="tab-chart" aria-selected="true" aria-controls="pane-chart" data-tab="chart">監控測項折線圖</button>
+          <button class="tab" role="tab" id="tab-temp" aria-selected="false" aria-controls="pane-temp" data-tab="temp">IC 溫度預測</button>
+        </div>
+        <label id="lbl-limits"><input type="checkbox" id="chk-limits" checked> Y 軸包含規格線</label>
+      </div>
+      <div class="tab-pane" id="pane-chart" role="tabpanel">
+        <div class="chart-sub" id="chart-title"></div>
+        <div id="chart"></div>
+        <div class="legend-row" id="site-legend"></div>
+      </div>
+      <div class="tab-pane" id="pane-temp" role="tabpanel" hidden>
+        <div class="panel-head" style="margin-bottom:2px;">
+          <div class="temp-note" id="temp-note" style="margin-bottom:0;"></div>
+          <div class="view-toggle" id="temp-view-toggle">
+            <button data-view="hex" class="active">蜂巢圖</button>
+            <button data-view="table">數值表</button>
+          </div>
+        </div>
+        <div class="hex-wrap" id="temp-hex" style="display:flex;"></div>
+        <div class="temp-wrap" id="temp-grid" style="display:none;"></div>
+        <div class="hex-scale-row" id="hex-scale">
+          <div class="hex-scale-bar"></div>
+          <div class="hex-scale-ticks"><span>25°C</span><span>30°C</span><span>35°C</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="sidebar">
+    <h3>即時異常通知 <span id="log-count">0 筆</span></h3>
+    <div class="empty-state" id="log-empty">等待產線資料串流載入中…</div>
+    <div id="log-container"></div>
+  </div>
+</div>
+
+<script>
+/* ═════════ 設定 ═════════ */
+const CONFIG = {
+  dataUrl: "dashboard_status.json",   // 與 simulate_stream.py --dashboard 的輸出檔同名
+  pollIntervalMs: 200,                // 模擬器每 0.3 秒一顆，評估顆只出現一瞬間，輪詢要比它快才不會漏掉
+  useMock: false,                     // true：完全不連檔案，只跑內建 Demo 資料
+  demoFallback: true,                 // 讀不到檔案時是否改跑 Demo（會明確標示）。正式 demo 建議改 false
+  ackUrl: null,                       // 有後端時填入，例如 "/api/ack"，Ack 會以 POST 送出
+  windowSize: 40,                     // 評估視窗大小（前 40 顆一定沒有告警，scores 為 null）
+  evalEvery: 4,                       // 後端每 N 顆才評估一次（window_features.py 的 EVAL_EVERY，兩邊必須一致）
+  temperatureKey: "temperature",      // JSON 裡放 predict_temperature 結果的欄位名（需與後端確認）
+  tempRange: [25, 35],                // 色階範圍 (°C)
+  tempSane: [10, 60],                 // 超出此範圍視為不合理（多半是舊模型檔）
+  tempLimit: null,                    // 溫度上限 (°C)：有值時超過會標紅。目前沒有已知規格，先留空
+  demoTickMs: 400,                    // Demo 模式每幾毫秒前進一顆
+  waferSize: 80,                      // 每片 wafer 的顆數上限
+  staleAfterMs: 10000,                // 超過這段時間資料沒變，就提示「資料未更新」
+  probeIntervalMs: 5000               // Demo 模式下，每隔多久再試一次真實檔案
+};
+
+/* ═════════ 狀態 ═════════ */
+const state = {
+  mode: "connecting",       // connecting | live | demo | offline
+  data: null,               // 最近一次的 dashboard_status（已整理）
+  evalKey: null,            // wafer_id:device_count，用來判斷是不是「新的一次評估」
+  lastChange: 0, lastOk: 0, lastProbe: 0, fails: 0,
+  lastWafer: null, lastDevice: null,
+  events: [],               // 前端累積的告警事件（alerts 只有最近一次結果，歷史要自己存）
+  active: {},               // anomaly_type -> 進行中的事件
+  focusLimits: true
+};
+let evSeq = 0;
+
+/* ═════════ 小工具 ═════════ */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const numOrNull = (v) => (v == null || v === "" || !isFinite(Number(v)) ? null : Number(v));
+const fmt = (v, d = 2) => (numOrNull(v) == null ? "—" : Number(v).toFixed(d));
+const signed = (v, d = 1) => (numOrNull(v) == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(d));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const PALETTE = ["#58a6ff", "#3fb950", "#d29922", "#bc8cff", "#39c5cf", "#f778ba", "#ffa657", "#8b949e"];
+const siteColor = (s) => PALETTE[((((Number(s) || 1) - 1) % PALETTE.length) + PALETTE.length) % PALETTE.length];
+
+const SCORE_META = {
+  std:        { name: "std",        hint: "離散度（標準差）" },
+  slope:      { name: "slope",      hint: "趨勢斜率" },
+  rstd_slope: { name: "rstd_slope", hint: "" },
+  site_range: { name: "site_range", hint: "站間差異 (Site range)" }
+};
+const SCORE_ORDER = ["std", "slope", "rstd_slope", "site_range"];
+const TYPE_ZH = {
+  "Measure Value Shift / Variation": "測值偏移／變異",
+  "Mean Trend Up/Down": "平均值趨勢（上升／下降）",
+  "Stdev Trend Up/Down": "標準差趨勢（上升／下降）",
+  "Site to Site Unbalance": "站間不平衡",
+  "Low Yield": "良率偏低",
+  "ML Composite Anomaly": "ML 綜合異常"
+};
+
+/* ═════════ 資料整理（全部對 null 防呆）═════════ */
+function parseSiteMap(x) {
+  const out = {};
+  if (typeof x === "string") {
+    for (const m of x.matchAll(/site\[(\d+)\]\s*:\s*(\S+)/gi)) out[m[1]] = numOrNull(m[2]);
+  } else if (Array.isArray(x)) {
+    x.forEach((v, i) => { out[i + 1] = numOrNull(v); });
+  } else if (x && typeof x === "object") {
+    Object.keys(x).forEach((k) => { out[k.replace(/\D/g, "") || k] = numOrNull(x[k]); });
+  }
+  return out;
+}
+function parseTemperature(t) {
+  if (t == null || typeof t !== "object") return null;
+  // 元珍最新格式：{ unit, latest: {sensorN: {site: value}}, history: {sensorN: [{n, site: value}]}, mae: {site: value} }
+  if (!t.latest || typeof t.latest !== "object") return null;
+
+  const sensors = Object.keys(t.latest).sort((a, b) => {
+    const na = parseInt(a.replace(/\D/g, ""), 10), nb = parseInt(b.replace(/\D/g, ""), 10);
+    return na - nb;
+  });
+
+  const rows = {};
+  sensors.forEach((sensorKey) => {
+    const sensorNum = sensorKey.replace(/\D/g, "") || sensorKey;
+    const siteMap = t.latest[sensorKey] || {};
+    // site key 在元珍的格式裡是字串（例如 "1"），這裡統一轉成 numOrNull 處理
+    const out = {};
+    Object.keys(siteMap).forEach((siteKey) => { out[siteKey] = numOrNull(siteMap[siteKey]); });
+    rows[sensorNum] = out;
+  });
+
+  return {
+    bySensor: rows,
+    history: t.history || {},
+    mae: t.mae || {},
+    unit: t.unit || "C"
+  };
+}
+
+function normalizeData(d) {
+  if (!d || typeof d !== "object") throw new Error("格式錯誤");
+  const lim = d.limits && typeof d.limits === "object" ? d.limits : {};
+  return {
+    wafer_id: d.wafer_id ?? null,
+    device_count: Number(d.device_count) || 0,
+    yield: numOrNull(d.yield),
+    monitor_test: d.monitor_test || "",
+    alerts: Array.isArray(d.alerts) ? d.alerts.filter((a) => a && a.is_anomaly !== false) : [],
+    scores: d.scores && typeof d.scores === "object" ? d.scores : null,
+    thresholds: d.thresholds && typeof d.thresholds === "object" ? d.thresholds : {},
+    window: (Array.isArray(d.current_window) ? d.current_window : [])
+      .filter((p) => p && numOrNull(p.value) != null)
+      .map((p) => ({ site: p.site ?? 0, value: Number(p.value) })),
+    limits: { high: numOrNull(lim.high), low: numOrNull(lim.low) },
+    temperature: parseTemperature(d[CONFIG.temperatureKey])
+  };
+}
+
+/* ═════════ 告警累積 ═════════ */
+const isEvalDevice = (n) => n >= CONFIG.windowSize && (n - CONFIG.windowSize) % CONFIG.evalEvery === 0;
+
+function closeAllActive() {
+  Object.values(state.active).forEach((ev) => { ev.active = false; ev.rev++; });
+  state.active = {};
+}
+
+function processEvaluation(d) {
+  const now = Date.now();
+  const restarted = state.lastWafer !== null && (d.wafer_id !== state.lastWafer || d.device_count < state.lastDevice);
+  if (restarted) closeAllActive();
+  state.lastWafer = d.wafer_id;
+  state.lastDevice = d.device_count;
+
+  const evalNow = isEvalDevice(d.device_count);
+  if (!evalNow && !d.alerts.length) return;
+
+  const present = new Set();
+  d.alerts.forEach((a) => {
+    const type = a.anomaly_type || "未分類異常";
+    present.add(type);
+    let ev = state.active[type];
+    const created = !ev;
+    if (created) {
+      ev = { id: "ev" + (++evSeq), wafer: d.wafer_id, type, startDevice: d.device_count, firstSeen: now,
+             count: 0, peak: null, active: true, acked: false, open: false, rev: 0, action: "set_message" };
+      state.events.push(ev);
+      state.active[type] = ev;
+    }
+    if (created) showToastForEvent(type, a);
+    if (!evalNow && !created) return;
+    ev.lastDevice = d.device_count;
+    ev.lastSeen = now;
+    ev.count++;
+    ev.rev++;
+    if (a.action === "set_pause") ev.action = "set_pause";
+    ev.score = numOrNull(a.score);
+    ev.threshold = numOrNull(a.threshold);
+    if (ev.score != null) ev.peak = Math.max(ev.peak ?? ev.score, ev.score);
+    ev.reason = a.reason || "";
+    ev.topItems = Array.isArray(a.top_items) ? a.top_items : [];
+  });
+
+  if (evalNow) {
+    Object.keys(state.active).forEach((t) => {
+      if (!present.has(t)) { state.active[t].active = false; state.active[t].rev++; delete state.active[t]; }
+    });
+  }
+}
+
+function resetStream() {
+  state.data = null; state.evalKey = null; state.lastWafer = null; state.lastDevice = null;
+  state.events = []; state.active = {}; state.lastChange = 0;
+  $("log-container").innerHTML = ""; cards.clear();
+}
+
+function ingest(payload) {
+  const d = normalizeData(payload);
+  const key = d.wafer_id + ":" + d.device_count;
+  const isNew = key !== state.evalKey;
+  if (!isNew && state.data) return;
+  state.data = d;
+  state.evalKey = key;
+  state.lastChange = Date.now();
+  processEvaluation(d);
+  renderAll();
+}
+
+/* ═════════ 連線狀態 ═════════ */
+function setMode(mode) {
+  if (state.mode === mode) return;
+  const prev = state.mode;
+  state.mode = mode;
+  if ((prev === "live" && mode === "demo") || (prev === "demo" && mode === "live")) resetStream();
+  document.body.dataset.mode = mode;
+
+  const b = $("banner");
+  b.className = "banner";
+  if (mode === "demo") {
+    b.classList.add("show", "demo");
+    b.textContent = "找不到 " + CONFIG.dataUrl + "，目前顯示的是內建模擬資料，不是產線即時資料。";
+  } else if (mode === "offline") {
+    b.classList.add("show");
+  }
+  paintBadge();
+}
+
+function paintBadge() {
+  const badge = $("conn-badge");
+  let shown = state.mode, text = { connecting: "連線中…", live: "資料串流正常", demo: "Demo 模式（模擬資料）", offline: "資料中斷" }[state.mode];
+  if (state.mode === "live" && state.lastChange && Date.now() - state.lastChange >= CONFIG.staleAfterMs) {
+    shown = "stale";
+    text = `資料已 ${Math.round((Date.now() - state.lastChange) / 1000)} 秒未更新（模擬可能已結束）`;
+  }
+  badge.dataset.mode = shown;
+  $("conn-text").textContent = text;
+}
+
+function updateOfflineBanner() {
+  if (state.mode !== "offline") return;
+  const sec = state.lastOk ? Math.round((Date.now() - state.lastOk) / 1000) : null;
+  $("banner").textContent = sec == null
+    ? `無法讀取 ${CONFIG.dataUrl}。請確認已在 bin 資料夾執行 python -m http.server 8000，且 simulate_stream.py 正在執行。`
+    : `資料中斷：畫面停在 ${sec} 秒前的數據，請勿據此判斷目前產線狀態。`;
+}
+
+function demoTick() {
+  if (Date.now() - demo.last < CONFIG.demoTickMs) return;
+  demo.last = Date.now();
+  ingest(generateDemoData());
+}
+
+async function fetchData() {
+  if (CONFIG.useMock) { setMode("demo"); demoTick(); return; }
+  if (state.mode === "demo" && Date.now() - state.lastProbe < CONFIG.probeIntervalMs) { demoTick(); return; }
+  state.lastProbe = Date.now();
+
+  try {
+    const res = await fetch(CONFIG.dataUrl + "?t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const payload = await res.json();
+    normalizeData(payload);
+    state.fails = 0; state.lastOk = Date.now();
+    setMode("live");
+    ingest(payload);
+  } catch (err) {
+    state.fails++;
+    if (state.fails < 3) return;
+    if (CONFIG.demoFallback) { setMode("demo"); demoTick(); }
+    else { setMode("offline"); updateOfflineBanner(); }
+  }
+}
+
+/* ═════════ Demo 資料 ═════════ */
+const demo = { wafer: 1, dev: 0, hist: [], last: 0, scores: null, seen: new Set() };
+function gauss() { return Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random()); }
+
+function generateDemoData() {
+  const thresholds = { std: 1.03, slope: 0.64, rstd_slope: 0.73, site_range: 1.03 };
+  demo.dev++;
+  if (demo.dev > CONFIG.waferSize) { demo.wafer++; demo.dev = 1; demo.hist = []; demo.scores = null; demo.seen = new Set(); }
+  const noisy = demo.wafer % 2 === 1;
+
+  const site = ((demo.dev - 1) % 4) + 1;
+  demo.seen.add(site);
+  let v = 1.1 + (site - 1) * 0.004 + gauss() * 0.012;
+  if (noisy && site === 3 && demo.dev >= 42) v += Math.min((demo.dev - 41) * 0.012, 0.16);
+  demo.hist.push({ site, value: +v.toFixed(3) });
+  if (demo.hist.length > CONFIG.windowSize) demo.hist.shift();
+
+  const alerts = [];
+  if (isEvalDevice(demo.dev)) {
+    const b = noisy ? clamp((demo.dev - 41) / 12, 0, 1) : 0;
+    const n = () => Math.abs(gauss()) * 0.05;
+    demo.scores = {
+      std: +(0.45 + b * 1.1 + n()).toFixed(2),
+      slope: +(0.3 + b * 0.5 + n()).toFixed(2),
+      rstd_slope: +(0.35 + b * 0.6 + n()).toFixed(2),
+      site_range: +(0.5 + b * 1.3 + n()).toFixed(2)
+    };
+    const sc = demo.scores;
+    if (sc.site_range > thresholds.site_range) {
+      alerts.push({
+        is_anomaly: true, anomaly_type: "Site to Site Unbalance", action: "set_pause",
+        reason: `近 40 顆中有 ${sc.site_range}% 的測項在「site_range」上偏離正常基準超過 4σ（門檻 ${thresholds.site_range}%）。（Demo 資料）`,
+        score: sc.site_range, threshold: thresholds.site_range,
+        top_items: [
+          { test: "6460_Main.subflow1.Flow1_Suite295#CP", z: +(20 + gauss() * 3).toFixed(1) },
+          { test: "1080_Main.subflow1.Flow1_Suite26#CP", z: +(18 + gauss() * 3).toFixed(1) }
+        ]
+      });
+    }
+    if (sc.std > thresholds.std) {
+      alerts.push({
+        is_anomaly: true, anomaly_type: "Stdev Trend Up/Down", action: "set_pause",
+        reason: "整體離散度高於門檻。（Demo 資料）",
+        score: sc.std, threshold: thresholds.std, top_items: []
+      });
+    }
+  }
+  const scores = demo.hist.length >= CONFIG.windowSize ? demo.scores : null;
+
+  const tempLatest = {}, tempMae = {};
+  for (let s = 1; s <= 6; s++) {
+    tempMae[s] = +(0.02 + s * 0.02).toFixed(3);
+    const siteMap = {};
+    [1, 2, 3, 4].forEach((k) => {
+      if (!demo.seen.has(k)) { siteMap[k] = null; return; }
+      let tv = 27.5 + s * 0.35 + k * 0.25 + gauss() * 0.05;
+      if (noisy && k === 3 && demo.dev >= 42) tv += Math.min((demo.dev - 41) * 0.09, 3.2);
+      siteMap[k] = +tv.toFixed(2);
+    });
+    tempLatest["sensor" + s] = siteMap;
+  }
+  const temperature = { unit: "C", latest: tempLatest, history: {}, mae: tempMae };
+
+  return {
+    wafer_id: demo.wafer, device_count: demo.dev, yield: +(79.5 + gauss() * 0.2).toFixed(2),
+    monitor_test: "220_Main.Suite1#CP", alerts, scores, thresholds,
+    current_window: [...demo.hist], limits: { high: 1.8, low: 0.6 },
+    [CONFIG.temperatureKey]: temperature
+  };
+}
+
+/* ═════════ 指標列 ═════════ */
+function updateMetrics() {
+  const d = state.data;
+  $("m-wafer").textContent = d && d.wafer_id != null ? "#" + d.wafer_id : "—";
+  $("m-test").textContent = d && d.monitor_test ? d.monitor_test : "—";
+  $("m-test").title = d && d.monitor_test ? d.monitor_test : "";
+  $("m-devices").innerHTML = d ? `${d.device_count}<span class="sub">/ ${CONFIG.waferSize}</span>` : "—";
+  $("m-progress").style.width = d ? clamp(d.device_count / CONFIG.waferSize * 100, 0, 100) + "%" : "0";
+  $("m-yield").textContent = d && d.yield != null ? d.yield.toFixed(1) + "%" : "—";
+
+  const live = state.events.filter((e) => e.active && !e.acked);
+  const st = $("m-status"), card = st.closest(".metric-card");
+  const critLive = live.filter((e) => e.action === "set_pause");
+  card.classList.toggle("status-critical", critLive.length > 0);
+  if (!d) { st.textContent = "—"; st.style.color = "var(--info-color)"; }
+  else if (critLive.length) { st.textContent = "建議暫停（待確認）"; st.style.color = "var(--crit-color)"; }
+  else if (live.length) { st.textContent = "RUNNING · 有警示"; st.style.color = "var(--warn-color)"; }
+  else { st.textContent = "RUNNING"; st.style.color = "var(--info-color)"; }
+
+  updateCriticalStrip(critLive);
+}
+
+/* ═════════ 主動示警橫幅：有未確認的嚴重異常就強制冒出來 ═════════ */
+function updateCriticalStrip(critLive) {
+  const strip = $("critical-strip");
+  if (!critLive || !critLive.length) { strip.classList.remove("show"); return; }
+  const top = critLive[critLive.length - 1];
+  $("cs-text").textContent = `${critLive.length} 項嚴重異常待確認 —— ${TYPE_ZH[top.type] || top.type}`;
+  $("cs-detail").textContent = `Wafer #${top.wafer ?? "—"} · 第 ${top.startDevice} 顆起 · 分數 ${fmt(top.score)} / 門檻 ${fmt(top.threshold)}`;
+  strip.classList.add("show");
+}
+
+/* ═════════ 異常分數 vs 門檻 ═════════ */
+function renderScores() {
+  const d = state.data, box = $("scores"), note = $("scores-note");
+  if (!d) { box.innerHTML = '<div class="empty-state">等待資料…</div>'; note.textContent = ""; return; }
+
+  const W = CONFIG.windowSize, E = CONFIG.evalEvery, n = d.device_count;
+  if (n < W) note.textContent = `視窗累積中 ${n}/${W} 顆（前 ${W} 顆不判斷，屬正常設計）`;
+  else if (!d.scores) note.textContent = "等待第一次評估";
+  else {
+    const last = W + Math.floor((n - W) / E) * E;
+    note.textContent = `單位 %　紅線 = 門檻　每 ${E} 顆評估一次（最近第 ${last} 顆，下次第 ${last + E} 顆）`;
+  }
+
+  const extra = Object.keys(d.thresholds).filter((k) => !SCORE_ORDER.includes(k));
+  const keys = [...SCORE_ORDER, ...extra];
+
+  box.innerHTML = keys.map((k) => {
+    const meta = SCORE_META[k] || { name: k, hint: "" };
+    const thr = numOrNull(d.thresholds[k]);
+    const sc = d.scores ? numOrNull(d.scores[k]) : null;
+    const over = sc != null && thr != null && sc > thr;
+    const max = Math.max(thr != null ? thr * 2.5 : 0, sc != null ? sc * 1.15 : 0, 1);
+    const pct = (v) => clamp(v / max * 100, 0, 100).toFixed(1) + "%";
+    const warming = n < W;
+    return `
+      <div class="score-row ${over ? "over" : ""}">
+        <div class="score-label"><b>${esc(meta.name)}</b>${meta.hint ? `<span>${esc(meta.hint)}</span>` : ""}</div>
+        <div class="track">
+          ${warming ? `<div class="fill warming" style="width:${clamp(n / W * 100, 0, 100).toFixed(1)}%"></div>` : ""}
+          ${sc != null ? `<div class="fill" style="width:${pct(sc)}"></div>` : ""}
+          ${!warming && thr != null ? `<div class="thr" style="left:${pct(thr)}" title="門檻 ${thr.toFixed(2)}%"></div>` : ""}
+        </div>
+        <div class="score-num">${warming ? `<span class="dim">累積中 ${n}/${W}</span>` : (sc == null ? "—" : sc.toFixed(2) + "%")}<span class="dim">${warming ? "" : " / " + (thr == null ? "—" : thr.toFixed(2) + "%")}</span>${over ? '<span class="over-tag">▲ 超標</span>' : ""}</div>
+      </div>`;
+  }).join("");
+}
+
+/* ═════════ 折線圖 ═════════ */
+function renderChart() {
+  const host = $("chart"), d = state.data, legend = $("site-legend");
+  const title = $("chart-title");
+  title.textContent = "監控測項：" + (d && d.monitor_test ? d.monitor_test : "—");
+  title.title = d && d.monitor_test ? d.monitor_test : "";
+
+  if (!d || !d.window.length) {
+    host.innerHTML = `<div class="empty-state">${d ? "這片 wafer 尚無資料（換片後會從 0 顆重新累積）" : "等待資料…"}</div>`;
+    legend.innerHTML = "";
+    return;
+  }
+  const W = host.clientWidth, H = host.clientHeight;
+  if (W < 80 || H < 80) return;
+
+  const { high, low } = d.limits;
+  const vals = d.window.map((p) => p.value);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (state.focusLimits) {
+    if (high != null) hi = Math.max(hi, high);
+    if (low != null) lo = Math.min(lo, low);
+  }
+  const pad = (hi - lo || 1) * 0.08;
+  lo -= pad; hi += pad;
+
+  const L = 52, R = 36, T = 12, B = 24;
+  const iw = W - L - R, ih = H - T - B;
+  const X = (i) => L + (i / (CONFIG.windowSize - 1)) * iw;
+  const Y = (v) => T + ih - ((v - lo) / (hi - lo)) * ih;
+
+  let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="監控測項折線圖">`;
+
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + ((hi - lo) * k) / 4, y = Y(v).toFixed(1);
+    s += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="#28303b" stroke-width="1"/>` +
+         `<text x="${L - 8}" y="${+y + 3}" text-anchor="end" font-size="10" fill="#8b949e">${v.toFixed(3)}</text>`;
+  }
+  s += `<text x="${L + iw / 2}" y="${H - 6}" text-anchor="middle" font-size="10" fill="#8b949e">舊 ← 測試順序（最近 ${d.window.length} 筆）→ 新</text>`;
+
+  const limitLine = (v, label) => {
+    if (v == null) return "";
+    if (v < lo || v > hi) {
+      const up = v > hi;
+      return `<text x="${W - R}" y="${up ? T + 10 : H - B - 4}" text-anchor="end" font-size="10" fill="#f85149">${up ? "▲" : "▼"} ${label} ${v.toFixed(3)}（超出顯示範圍）</text>`;
+    }
+    const y = Y(v).toFixed(1);
+    return `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="#f85149" stroke-width="1.2" stroke-dasharray="6 4"/>` +
+           `<text x="${W - R - 4}" y="${+y - 4}" text-anchor="end" font-size="10" fill="#f85149">${label} ${v.toFixed(3)}</text>`;
+  };
+  s += limitLine(high, "規格上限") + limitLine(low, "規格下限");
+
+  const groups = new Map();
+  d.window.forEach((p, i) => {
+    if (!groups.has(p.site)) groups.set(p.site, []);
+    groups.get(p.site).push({ i, v: p.value });
+  });
+  const sites = [...groups.keys()].sort((a, b) => a - b);
+
+  sites.forEach((sv) => {
+    const pts = groups.get(sv), col = siteColor(sv);
+    s += `<polyline fill="none" stroke="${col}" stroke-width="1.6" stroke-linejoin="round" opacity=".9" points="${pts.map((p) => X(p.i).toFixed(1) + "," + Y(p.v).toFixed(1)).join(" ")}"/>`;
+    pts.forEach((p) => {
+      const cx = X(p.i).toFixed(1), cy = Y(p.v).toFixed(1);
+      // 一個看不見但比較大的圈是為了滑鼠好命中，真正顯示的是 r=3 的實心點
+      s += `<circle class="chart-pt" cx="${cx}" cy="${cy}" r="8" fill="transparent"
+              data-site="${esc(sv)}" data-value="${p.v}" data-idx="${p.i + 1}"/>`;
+      s += `<circle cx="${cx}" cy="${cy}" r="3" fill="${col}" pointer-events="none"/>`;
+    });
+    const lp = pts[pts.length - 1];
+    s += `<text x="${(X(lp.i) + 7).toFixed(1)}" y="${(Y(lp.v) + 3).toFixed(1)}" font-size="10" fill="${col}">S${esc(sv)}</text>`;
+  });
+  host.innerHTML = s + "</svg>";
+
+  host.querySelectorAll(".chart-pt").forEach((pt) => {
+    pt.addEventListener("mouseenter", (e) => {
+      const tip = $("hex-tooltip");
+      const site = pt.dataset.site, v = Number(pt.dataset.value), idx = pt.dataset.idx;
+      const withinLimits = (high == null || v <= high) && (low == null || v >= low);
+      tip.innerHTML = `<b>Site ${esc(site)} · 視窗第 ${esc(idx)} 筆</b>
+        <span class="dim">量測值 ${v.toFixed(3)}</span>
+        <span class="dim" style="${withinLimits ? "" : "color:var(--crit-color)"}">${withinLimits ? "在規格範圍內" : "超出規格範圍"}</span>`;
+      tip.style.display = "block";
+      positionTooltip(e);
+    });
+    pt.addEventListener("mousemove", (e) => positionTooltip(e));
+    pt.addEventListener("mouseleave", hideHexTooltip);
+  });
+
+  legend.innerHTML = sites.map((sv) => {
+    const pts = groups.get(sv), m = pts.reduce((a, p) => a + p.v, 0) / pts.length;
+    return `<span class="chip"><i style="background:${siteColor(sv)}"></i>Site ${esc(sv)}<span class="dim">均值 ${m.toFixed(3)} · ${pts.length} 筆</span></span>`;
+  }).join("") + `<span class="dim" style="margin-left:auto;">滑鼠移到點上可看細節</span>`;
+}
+
+/* ═════════ 側邊欄：異常卡片 ═════════ */
+const cards = new Map();
+
+function rank(ev) { return (ev.acked ? 4 : 0) + (ev.active ? 0 : 2) + (ev.action === "set_pause" ? 0 : 1); }
+
+function cardHTML(ev) {
+  const crit = ev.action === "set_pause";
+  const range = ev.lastDevice > ev.startDevice ? `第 ${ev.startDevice}–${ev.lastDevice} 顆` : `第 ${ev.startDevice} 顆`;
+  const items = ev.topItems || [];
+  return `
+    <div class="sev-bar"></div>
+    <div class="card-body">
+      <div class="log-header">
+        <span>${esc(ev.type)}<span class="state-tag ${ev.active ? "on" : "dim"}">${ev.active ? "● 進行中" : "已恢復正常"}</span>${TYPE_ZH[ev.type] ? `<span class="zh">${esc(TYPE_ZH[ev.type])}</span>` : ""}</span>
+        <span class="action-tag">${crit ? "⏸ 暫停" : "💬 警示"}</span>
+      </div>
+      <div class="dim">Wafer #${esc(ev.wafer ?? "—")} · ${range} · 已觸發 ${ev.count} 次評估</div>
+      <div style="margin-top:4px;" class="mono">分數 <b>${fmt(ev.score)}</b> <span class="dim">/ 門檻 ${fmt(ev.threshold)}${ev.peak != null && ev.peak > (ev.score ?? 0) + 1e-9 ? " · 峰值 " + fmt(ev.peak) : ""}</span></div>
+      ${ev.reason ? `<div class="reason-box">分析原因：${esc(ev.reason)}</div>` : ""}
+      ${items.length ? `
+        <details data-ev="${ev.id}" ${ev.open ? "open" : ""}>
+          <summary>偏離最大的測項（${items.length}）</summary>
+          <ul class="items">${items.map((it) => `<li><span class="t">${esc(it.test)}</span><span class="z">${signed(it.z)}σ</span></li>`).join("")}</ul>
+        </details>` : ""}
+      ${ev.acked ? `<div class="ack-done">✓ 已確認</div>`
+                 : `<div class="card-actions"><button class="btn" data-ack="${ev.id}">確認已處理</button></div>`}
+    </div>`;
+}
+
+function renderLogs() {
+  const container = $("log-container");
+  const list = [...state.events].sort((a, b) => rank(a) - rank(b) || b.lastSeen - a.lastSeen);
+  const live = state.events.filter((e) => e.active && !e.acked).length;
+
+  $("log-count").textContent = `${state.events.length} 筆 · 未確認 ${live}`;
+  const empty = $("log-empty");
+  empty.style.display = list.length ? "none" : "block";
+  empty.textContent = state.data ? "✅ 目前沒有異常告警" : "等待產線資料串流載入中…";
+
+  list.forEach((ev, idx) => {
+    let el = cards.get(ev.id);
+    if (!el) { el = document.createElement("div"); el.dataset.id = ev.id; cards.set(ev.id, el); }
+    const sig = [ev.rev, ev.acked, ev.active].join("|");
+    if (el.dataset.sig !== sig) {
+      el.dataset.sig = sig;
+      el.className = `log-card ${ev.action === "set_pause" ? "critical" : "anomaly"}${ev.acked ? " acked" : ""}${ev.active ? "" : " resolved"}`;
+      el.innerHTML = cardHTML(ev);
+    }
+    if (container.children[idx] !== el) container.insertBefore(el, container.children[idx] || null);
+  });
+}
+
+/* ═════════ 異常警示彈窗 ═════════ */
+function showToastForEvent(type, a) {
+  const stack = $("toast-stack");
+  const critical = a.action === "set_pause";
+  const el = document.createElement("div");
+  el.className = "toast" + (critical ? " critical" : "");
+  el.innerHTML = `
+    <div class="toast-head">
+      <span class="toast-tag">${critical ? "⏸ 暫停" : "💬 警示"}</span>
+      <span>${esc(TYPE_ZH[type] || type)}</span>
+    </div>
+    <button class="toast-close" aria-label="關閉">✕</button>
+  `;
+  el.querySelector(".toast-close").addEventListener("click", () => dismissToast(el));
+  stack.appendChild(el);
+  // set_message 幾秒後自動消失；set_pause 需要手動關閉，才不會漏看嚴重問題
+  if (!critical) setTimeout(() => dismissToast(el), 4500);
+  // 同時最多顯示 2 則，超過的收進側邊欄清單就好，不再堆疊彈窗洗版
+  const toasts = stack.querySelectorAll(".toast");
+  if (toasts.length > 2) dismissToast(toasts[0]);
+}
+function dismissToast(el) {
+  if (!el || el.classList.contains("leaving")) return;
+  el.classList.add("leaving");
+  setTimeout(() => el.remove(), 220);
+}
+
+/* ═════════ IC 溫度預測 ═════════ */
+let tempView = "hex";
+
+const SENSOR_HINT = { 1: "近晶片中心", 2: "邊緣區", 3: "邊緣區", 4: "高功耗區", 5: "邊緣區", 6: "近晶片中心" };
+
+function renderTempHex() {
+  const d = state.data, host = $("temp-hex");
+  const [tlo, thi] = CONFIG.tempRange, [slo, shi] = CONFIG.tempSane;
+
+  if (!d) { host.innerHTML = '<div class="empty-state">等待資料…</div>'; return; }
+  const temp = d.temperature;
+  if (!temp || !temp.bySensor) {
+    host.innerHTML = `<div class="empty-state">資料裡還沒有「${esc(CONFIG.temperatureKey)}」欄位。<br>請確認後端有把 predict_temperature 的結果寫進 JSON。</div>`;
+    return;
+  }
+  const t = temp.bySensor, mae = temp.mae || {};
+  const sensors = Object.keys(t).sort((a, b) => a - b);
+  const sites = [...new Set(sensors.flatMap((s) => Object.keys(t[s])))].sort((a, b) => a - b);
+
+  const tempToColor = (v) => {
+    if (v == null || v < slo || v > shi) return "rgba(139,148,158,.25)";
+    const k = clamp((v - tlo) / (thi - tlo), 0, 1);
+    // 冷 → 暖 三段漸層，跟折線圖/長條圖的紅色警示語彙一致
+    if (k < 0.5) {
+      const kk = k / 0.5;
+      return mixColor([43,108,176], [56,161,105], kk);
+    } else {
+      const kk = (k - 0.5) / 0.5;
+      return mixColor([56,161,105], [248,81,73], kk);
+    }
+  };
+
+  let rows = `<div class="hex-col-labels"><span class="hex-axis-corner"></span>${sites.map((k) => `<span>Site ${esc(k)}</span>`).join("")}</div>`;
+  sensors.forEach((s) => {
+    let cells = "";
+    sites.forEach((site) => {
+      const v = t[s][site];
+      const isNa = v == null;
+      const isBad = !isNa && (v < slo || v > shi);
+      const hot = !isNa && !isBad && CONFIG.tempLimit != null && v > CONFIG.tempLimit;
+      const bg = isNa || isBad ? "" : `background:${tempToColor(v)};`;
+      const cls = "hex" + (isNa || isBad ? " na" : "") + (hot ? " hex-hot" : "");
+      cells += `<div class="${cls}" style="${bg}"
+        data-sensor="${esc(s)}" data-site="${esc(site)}"
+        data-val="${isNa ? "" : v}" data-mae="${fmt(mae[s], 3)}">
+        ${isNa ? '<span class="hex-tag">NA</span>' : `<b>${v.toFixed(1)}</b><span class="hex-tag">S${esc(site)}</span>`}
+      </div>`;
+    });
+    rows += `<div class="hex-row"><div class="hex-row-label">Sensor ${esc(s)}</div><div class="hex-layout">${cells}</div></div>`;
+  });
+
+  host.innerHTML = `<div class="hex-grid">${rows}</div>`;
+
+  host.querySelectorAll(".hex:not(.na)").forEach((hex) => {
+    hex.addEventListener("mouseenter", (e) => showHexTooltip(e, hex));
+    hex.addEventListener("mousemove", (e) => positionTooltip(e));
+    hex.addEventListener("mouseleave", hideHexTooltip);
+  });
+}
+
+function mixColor(a, b, k) {
+  const m = (i) => Math.round(a[i] + (b[i] - a[i]) * k);
+  return `rgb(${m(0)},${m(1)},${m(2)})`;
+}
+
+function showHexTooltip(e, hex) {
+  const tip = $("hex-tooltip");
+  const s = hex.dataset.sensor, site = hex.dataset.site, v = hex.dataset.val, mae = hex.dataset.mae;
+  tip.innerHTML = `<b>Sensor ${esc(s)} · Site ${esc(site)}</b>
+    <span class="dim">${esc(v)} °C ± ${esc(mae)}°C</span>
+    <span class="dim">${esc(SENSOR_HINT[s] || "")}</span>`;
+  tip.style.display = "block";
+  positionTooltip(e);
+}
+function positionTooltip(e) {
+  const tip = $("hex-tooltip");
+  tip.style.left = (e.clientX + 16) + "px";
+  tip.style.top = (e.clientY + 12) + "px";
+}
+function hideHexTooltip() { $("hex-tooltip").style.display = "none"; }
+
+/* ═════════ IC 溫度預測（數值表）═════════ */
+function renderTemp() {
+  const d = state.data, grid = $("temp-grid"), note = $("temp-note");
+  const [tlo, thi] = CONFIG.tempRange, [slo, shi] = CONFIG.tempSane;
+
+  if (!d) { grid.innerHTML = '<div class="empty-state">等待資料…</div>'; return; }
+  const temp = d.temperature;
+  if (!temp || !temp.bySensor) {
+    note.textContent = "";
+    grid.innerHTML = `<div class="empty-state">資料裡還沒有「${esc(CONFIG.temperatureKey)}」欄位。<br>請確認後端有把 predict_temperature 的結果寫進 JSON。</div>`;
+    return;
+  }
+  const t = temp.bySensor;
+  const mae = temp.mae || {};
+
+  const sensors = Object.keys(t).sort((a, b) => a - b);
+  const sites = [...new Set(sensors.flatMap((s) => Object.keys(t[s])))].sort((a, b) => a - b);
+  let bad = 0, hot = 0, na = 0;
+
+  const cell = (v) => {
+    if (v == null) { na++; return `<td class="na" title="該 site 尚未測過任何一顆">NA</td>`; }
+    if (v < slo || v > shi) { bad++; return `<td class="bad" title="數值不合理，模型檔可能是舊的">${v.toFixed(2)} ⚠</td>`; }
+    const over = CONFIG.tempLimit != null && v > CONFIG.tempLimit;
+    if (over) hot++;
+    const k = clamp((v - tlo) / (thi - tlo), 0, 1);
+    return over ? `<td class="bad">${v.toFixed(2)} ▲</td>`
+                : `<td style="background:rgba(210,153,34,${(0.08 + 0.47 * k).toFixed(2)})">${v.toFixed(2)}</td>`;
+  };
+
+  const body = sensors.map((s) =>
+    `<tr><th class="row" scope="row">Sensor ${esc(s)}<span class="dim" style="font-weight:400;font-size:9px;display:block;">±${fmt(mae[s], 3)}°C</span></th>${sites.map((k) => cell(t[s][k] ?? null)).join("")}</tr>`).join("");
+
+  const avg = `<tr class="avg"><th class="row" scope="row">各 site 平均</th>${sites.map((k) => {
+    const vs = sensors.map((s) => t[s][k]).filter((v) => v != null && v >= slo && v <= shi);
+    return vs.length ? `<td>${(vs.reduce((a, b) => a + b, 0) / vs.length).toFixed(2)}</td>` : `<td class="na">NA</td>`;
+  }).join("")}</tr>`;
+
+  grid.innerHTML = `<table class="temp"><thead><tr><th></th>${sites.map((k) => `<th scope="col">Site ${esc(k)}</th>`).join("")}</tr></thead><tbody>${body}${avg}</tbody></table>`;
+
+  note.innerHTML = `預測溫度（°C），第 ${d.device_count} 顆時更新 · 各 sensor 標籤下方為模型平均誤差(MAE)` +
+    (na ? ` · ${na} 格為 NA（該 site 還沒測過任何一顆）` : "") +
+    (hot ? ` <span class="bad">· ${hot} 格超過上限 ${CONFIG.tempLimit} °C</span>` : "") +
+    (bad ? ` <span class="bad">· ${bad} 格數值不合理（像 0.18 這種數字代表模型檔是舊的）</span>` : "");
+}
+
+function setTab(name) {
+  ["chart", "temp"].forEach((n) => {
+    $("pane-" + n).hidden = n !== name;
+    $("tab-" + n).setAttribute("aria-selected", String(n === name));
+  });
+  $("lbl-limits").style.display = name === "chart" ? "" : "none";
+  if (name === "chart") renderChart();
+}
+
+function renderAll() {
+  updateMetrics();
+  renderScores();
+  renderChart();
+  renderTempHex();
+  renderTemp();
+  renderLogs();
+  paintBadge();
+}
+
+/* ═════════ 互動 ═════════ */
+function ackEvent(id) {
+  const ev = state.events.find((e) => e.id === id);
+  if (!ev) return;
+  ev.acked = true; ev.rev++;
+  if (CONFIG.ackUrl) {
+    fetch(CONFIG.ackUrl, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wafer_id: ev.wafer, anomaly_type: ev.type, start_device: ev.startDevice, acked_at: new Date().toISOString() })
+    }).catch((e) => console.warn("Ack 未能送達後端：", e));
+  }
+  updateMetrics(); renderLogs();
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-ack]");
+  if (b) ackEvent(b.dataset.ack);
+});
+document.addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (d.tagName === "DETAILS" && d.dataset.ev) {
+    const ev = state.events.find((x) => x.id === d.dataset.ev);
+    if (ev) ev.open = d.open;
+  }
+}, true);
+
+document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
+$("cs-jump").addEventListener("click", () => {
+  const firstCritical = state.events.find((e) => e.active && !e.acked && e.action === "set_pause");
+  const el = firstCritical && cards.get(firstCritical.id);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+});
+document.querySelectorAll("#temp-view-toggle button").forEach((b) => b.addEventListener("click", () => {
+  tempView = b.dataset.view;
+  document.querySelectorAll("#temp-view-toggle button").forEach((x) => x.classList.toggle("active", x === b));
+  $("temp-hex").style.display = tempView === "hex" ? "flex" : "none";
+  $("temp-grid").style.display = tempView === "table" ? "block" : "none";
+  $("hex-scale").style.display = tempView === "hex" ? "flex" : "none";
+}));
+$("chk-limits").addEventListener("change", (e) => { state.focusLimits = e.target.checked; renderChart(); });
+new ResizeObserver(() => renderChart()).observe($("chart"));
+
+/* ═════════ 啟動 ═════════ */
+fetchData();
+setInterval(fetchData, CONFIG.pollIntervalMs);
+setInterval(() => { paintBadge(); updateOfflineBanner(); }, 1000);
+</script>
+
+</body>
+</html>
