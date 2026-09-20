@@ -331,7 +331,6 @@ class SampleMonitor(Monitor):
             print(f"query_PartText = {data.query_PartText(index)}")
 
     def notify(self, alert):
-        """把異常通知機台（題目「重要事項(3)」：用 ActionManager.set_message）。"""
         det = self.bridge.detector
         text = format_alert(alert, self.bridge.wafer_id,
                             det.total_count if det else None)
